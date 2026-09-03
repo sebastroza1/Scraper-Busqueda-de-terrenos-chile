@@ -1,0 +1,32 @@
+metadata:
+  program: DS19
+  year: 2026
+  call: llamado_especial
+  version: 0.1.0
+  status: TO_VERIFY
+  verified: false
+  notes: >
+    DS19 uses an independent rule set. Do not assume DS49 criteria apply.
+
+rules:
+  - rule_id: DS19_2026_CALL_APPLICABILITY
+    program: DS19
+    year: 2026
+    call: llamado_especial
+    region: UNKNOWN
+    commune_applicability: UNKNOWN
+    verified: false
+    status: TO_VERIFY
+    description: Applicability depends on the official DS19 call and geography.
+    legal_source: TO_VERIFY_MINVU_DS19_CALL
+    legal_source_url: null
+    resolution_or_call: TO_VERIFY
+    normative_value: UNKNOWN
+    effective_date: null
+    fact_key: ds19.call_applicability
+    operator: equals
+    threshold: UNKNOWN
+    severity: critical
+    automatic: false
+    manual_review_required: true
+    notes: UNKNOWN until official DS19 call rules are loaded.

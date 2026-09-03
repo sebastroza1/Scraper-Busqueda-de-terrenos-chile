@@ -1,0 +1,55 @@
+metadata:
+  program: DS49
+  year: 2026
+  call: adquisicion_terrenos
+  version: 0.1.0
+  status: TO_VERIFY
+  verified: false
+  notes: >
+    Placeholder rule file. Thresholds must be filled only from the official
+    MINVU resolution for the specific call, region and commune.
+
+rules:
+  - rule_id: DS49_2026_CIP_REQUIRED
+    program: DS49
+    year: 2026
+    call: adquisicion_terrenos
+    region: UNKNOWN
+    commune_applicability: UNKNOWN
+    verified: false
+    status: TO_VERIFY
+    description: CIP must be uploaded or reviewed before any urban conclusion.
+    legal_source: TO_VERIFY_MINVU_RESOLUTION
+    legal_source_url: null
+    resolution_or_call: TO_VERIFY
+    normative_value: UNKNOWN
+    effective_date: null
+    fact_key: cip.status
+    operator: exists
+    threshold: UNKNOWN
+    severity: critical
+    automatic: false
+    manual_review_required: true
+    notes: MANUAL_REVIEW_REQUIRED
+
+  - rule_id: DS49_2026_LOCALIZATION_POLYGON
+    program: DS49
+    year: 2026
+    call: adquisicion_terrenos
+    region: UNKNOWN
+    commune_applicability: UNKNOWN
+    verified: false
+    status: TO_VERIFY
+    description: Location against official applicable polygons, if available.
+    legal_source: TO_VERIFY_OFFICIAL_MINVU_LAYER_OR_RESOLUTION
+    legal_source_url: null
+    resolution_or_call: TO_VERIFY
+    normative_value: UNKNOWN
+    effective_date: null
+    fact_key: ds49.localization_polygon_status
+    operator: equals
+    threshold: UNKNOWN
+    severity: critical
+    automatic: false
+    manual_review_required: true
+    notes: UNKNOWN until official layer/call is loaded.

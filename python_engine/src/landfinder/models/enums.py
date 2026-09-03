@@ -1,0 +1,211 @@
+from enum import StrEnum
+
+
+class SourceType(StrEnum):
+    MARKETPLACE = "marketplace"
+    BROKER = "broker"
+    PUBLIC_PROCUREMENT = "public_procurement"
+    AUCTION = "auction"
+    GEO = "geo"
+    CADASTRAL = "cadastral"
+    MANUAL = "manual"
+
+
+class SourceRole(StrEnum):
+    SEARCH = "SearchSource"
+    ENRICHMENT = "EnrichmentSource"
+
+
+class SourceRunStatus(StrEnum):
+    SUCCESS = "SUCCESS"
+    SUCCESS_WITH_WARNINGS = "SUCCESS_WITH_WARNINGS"
+    SKIPPED_DISABLED = "SKIPPED_DISABLED"
+    SKIPPED_NOT_CONFIGURED = "SKIPPED_NOT_CONFIGURED"
+    INVALID_CREDENTIAL = "INVALID_CREDENTIAL"
+    RATE_LIMITED = "RATE_LIMITED"
+    SERVICE_UNAVAILABLE = "SERVICE_UNAVAILABLE"
+    FAILED = "FAILED"
+
+
+class LandClassification(StrEnum):
+    LAND_ACQUISITION = "LAND_ACQUISITION"
+    LAND_SALE = "LAND_SALE"
+    REAL_ESTATE = "REAL_ESTATE"
+    POSSIBLE_LAND = "POSSIBLE_LAND"
+    FALSE_POSITIVE = "FALSE_POSITIVE"
+    UNKNOWN = "UNKNOWN"
+
+
+class ManualClassification(StrEnum):
+    UNREVIEWED = "UNREVIEWED"
+    CONFIRMED_LAND = "CONFIRMED_LAND"
+    POSSIBLE_LAND = "POSSIBLE_LAND"
+    CONFIRMED_NOT_LAND = "CONFIRMED_NOT_LAND"
+
+
+class ManualReviewStatus(StrEnum):
+    UNREVIEWED = "UNREVIEWED"
+    REVIEWED = "REVIEWED"
+
+
+class ConnectorStrategy(StrEnum):
+    OFFICIAL_API = "official_api"
+    ARCGIS_REST = "arcgis_rest"
+    WFS = "wfs"
+    WMS = "wms"
+    GEOJSON = "geojson"
+    OPEN_DATA = "open_data"
+    HTML = "html"
+    BROWSER = "browser"
+    PDF = "pdf"
+    MANUAL_ASSISTED = "manual_assisted"
+
+
+class SourceAuditStatus(StrEnum):
+    ACTIVE = "ACTIVE"
+    PARTIAL = "PARTIAL"
+    MANUAL = "MANUAL"
+    BLOCKED = "BLOCKED"
+    TO_VERIFY = "TO_VERIFY"
+
+
+class SourceHealthStatus(StrEnum):
+    ACTIVE = "ACTIVE"
+    DEGRADED = "DEGRADED"
+    BROKEN = "BROKEN"
+    MANUAL = "MANUAL"
+    BLOCKED = "BLOCKED"
+
+
+class CredentialDiagnosticStatus(StrEnum):
+    CONNECTED = "CONNECTED"
+    INVALID_CREDENTIAL = "INVALID_CREDENTIAL"
+    EXPIRED = "EXPIRED"
+    RATE_LIMITED = "RATE_LIMITED"
+    UNAVAILABLE = "UNAVAILABLE"
+    NOT_CONFIGURED = "NOT_CONFIGURED"
+
+
+class ListingStatus(StrEnum):
+    ACTIVE = "active"
+    PAUSED = "paused"
+    REMOVED = "removed"
+    SOLD = "sold"
+    UNKNOWN = "unknown"
+
+
+class SellerType(StrEnum):
+    OWNER = "owner"
+    BROKER = "broker"
+    COMPANY = "company"
+    PUBLIC_ENTITY = "public_entity"
+    AUCTIONEER = "auctioneer"
+    UNKNOWN = "unknown"
+
+
+class LocationPrecision(StrEnum):
+    EXACT = "EXACT"
+    APPROXIMATE = "APPROXIMATE"
+    CENTROID = "CENTROID"
+    APPROXIMATE_PROPERTY = "APPROXIMATE_PROPERTY"
+    PROPERTY_COMMUNE_CENTROID = "PROPERTY_COMMUNE_CENTROID"
+    ORGANIZATION_LOCATION_ONLY = "ORGANIZATION_LOCATION_ONLY"
+    UNKNOWN = "UNKNOWN"
+
+
+class GeometryType(StrEnum):
+    POINT = "POINT"
+    POLYGON = "POLYGON"
+    MULTIPOLYGON = "MULTIPOLYGON"
+    UNKNOWN = "UNKNOWN"
+
+
+class GeometryStatus(StrEnum):
+    UNKNOWN = "UNKNOWN"
+    APPROXIMATE_LOCATION = "APPROXIMATE_LOCATION"
+    VERIFIED_POINT = "VERIFIED_POINT"
+    VERIFIED_POLYGON = "VERIFIED_POLYGON"
+
+
+class UrbanLimitStatus(StrEnum):
+    YES = "YES"
+    NO = "NO"
+    UNKNOWN = "UNKNOWN"
+
+
+class Program(StrEnum):
+    DS49 = "DS49"
+    DS19 = "DS19"
+
+
+class CompatibilityStatus(StrEnum):
+    COMPATIBLE_PRELIMINARMENTE = "COMPATIBLE_PRELIMINARMENTE"
+    COMPATIBLE_CON_OBSERVACIONES = "COMPATIBLE_CON_OBSERVACIONES"
+    INFORMACION_INSUFICIENTE = "INFORMACION_INSUFICIENTE"
+    INCOMPATIBLE_POR_REGLA_VERIFICABLE = "INCOMPATIBLE_POR_REGLA_VERIFICABLE"
+
+
+class RuleResultStatus(StrEnum):
+    PASSED = "PASSED"
+    FAILED = "FAILED"
+    UNKNOWN = "UNKNOWN"
+    MANUAL_REVIEW_REQUIRED = "MANUAL_REVIEW_REQUIRED"
+    NOT_APPLICABLE = "NOT_APPLICABLE"
+
+
+class CIPStatus(StrEnum):
+    NOT_REQUESTED = "NOT_REQUESTED"
+    AVAILABLE_ONLINE = "AVAILABLE_ONLINE"
+    REQUEST_REQUIRED = "REQUEST_REQUIRED"
+    UPLOADED = "UPLOADED"
+    PARSED = "PARSED"
+    MANUAL_REVIEW_REQUIRED = "MANUAL_REVIEW_REQUIRED"
+
+
+class RiskStatus(StrEnum):
+    CLEAR = "CLEAR"
+    WARNING = "WARNING"
+    CRITICAL = "CRITICAL"
+    UNKNOWN = "UNKNOWN"
+
+
+class PipelineStage(StrEnum):
+    DISCOVERY = "DISCOVERY"
+    DETAIL_EXTRACTION = "DETAIL_EXTRACTION"
+    NORMALIZATION = "NORMALIZATION"
+    UF_ENRICHMENT = "UF_ENRICHMENT"
+    IMAGE_PROCESSING = "IMAGE_PROCESSING"
+    DEDUPLICATION = "DEDUPLICATION"
+    PERSISTENCE = "PERSISTENCE"
+    EXPORT_READY = "EXPORT_READY"
+
+    # Future stages. They stay out of the MVP runner until the vertical slice is solid.
+    GEOCODING = "GEOCODING"
+    CADASTRAL_ENRICHMENT = "CADASTRAL_ENRICHMENT"
+    GIS_ENRICHMENT = "GIS_ENRICHMENT"
+    URBAN_ANALYSIS = "URBAN_ANALYSIS"
+    RISK_ANALYSIS = "RISK_ANALYSIS"
+    ACCESSIBILITY_ANALYSIS = "ACCESSIBILITY_ANALYSIS"
+    PROGRAM_RULE_ENGINE = "PROGRAM_RULE_ENGINE"
+    SCORING = "SCORING"
+    USER_REVIEW = "USER_REVIEW"
+    EXPORT = "EXPORT"
+
+
+class JobStatus(StrEnum):
+    QUEUED = "QUEUED"
+    RUNNING = "RUNNING"
+    CANCELLING = "CANCELLING"
+    CANCELLED = "CANCELLED"
+    COMPLETED = "COMPLETED"
+    COMPLETED_WITH_WARNINGS = "COMPLETED_WITH_WARNINGS"
+    COMPLETED_WITH_ERRORS = "COMPLETED_WITH_ERRORS"
+    FAILED = "FAILED"
+
+
+class PipelineEventType(StrEnum):
+    STARTED = "started"
+    PROGRESS = "progress"
+    COMPLETED = "completed"
+    WARNING = "warning"
+    ERROR = "error"
