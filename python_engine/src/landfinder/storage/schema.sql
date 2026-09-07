@@ -21,6 +21,9 @@ CREATE TABLE IF NOT EXISTS property_candidates (
   latitude REAL,
   longitude REAL,
   location_precision TEXT NOT NULL,
+  location_source TEXT,
+  location_method TEXT,
+  geocoded_at TEXT,
   geocoding_source TEXT,
   geocoding_confidence REAL NOT NULL DEFAULT 0,
   geometry_status TEXT NOT NULL DEFAULT 'UNKNOWN',
@@ -55,6 +58,11 @@ CREATE TABLE IF NOT EXISTS property_candidates (
   auction_date TEXT,
   data_quality_score INTEGER,
   anomaly_flags_json TEXT NOT NULL DEFAULT '[]',
+  territorial_status TEXT NOT NULL DEFAULT 'SIN_INFORMACION_SUFICIENTE',
+  territorial_checked_at TEXT,
+  territorial_summary_json TEXT NOT NULL DEFAULT '{}',
+  candidate_status TEXT NOT NULL DEFAULT 'ACTIVE',
+  manual_notes TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -64,6 +72,9 @@ CREATE INDEX IF NOT EXISTS idx_property_location
 
 CREATE INDEX IF NOT EXISTS idx_property_price_area
   ON property_candidates (asking_price_uf, gross_area_m2);
+
+CREATE INDEX IF NOT EXISTS idx_property_candidates_location_method
+  ON property_candidates (location_method, location_precision);
 
 CREATE TABLE IF NOT EXISTS property_source_records (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -256,6 +267,78 @@ CREATE TABLE IF NOT EXISTS geospatial_cache (
   created_at TEXT NOT NULL,
   expires_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS geocoding_cache (
+  cache_key TEXT PRIMARY KEY,
+  provider TEXT NOT NULL,
+  query_text TEXT NOT NULL,
+  normalized_query TEXT NOT NULL,
+  request_json TEXT NOT NULL DEFAULT '{}',
+  response_json TEXT NOT NULL DEFAULT '{}',
+  latitude REAL,
+  longitude REAL,
+  display_name TEXT,
+  location_precision TEXT NOT NULL DEFAULT 'UNKNOWN',
+  location_method TEXT NOT NULL,
+  confidence REAL NOT NULL DEFAULT 0,
+  source_url TEXT,
+  created_at TEXT NOT NULL,
+  last_used_at TEXT NOT NULL,
+  expires_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS property_location_history (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  internal_id TEXT NOT NULL REFERENCES property_candidates(internal_id) ON DELETE CASCADE,
+  latitude REAL,
+  longitude REAL,
+  location_source TEXT,
+  location_method TEXT NOT NULL,
+  location_precision TEXT NOT NULL DEFAULT 'UNKNOWN',
+  location_confidence REAL NOT NULL DEFAULT 0,
+  address TEXT,
+  region TEXT,
+  commune TEXT,
+  raw_result_json TEXT NOT NULL DEFAULT '{}',
+  assigned_by TEXT NOT NULL DEFAULT 'system',
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS minvu_layers (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  provider TEXT NOT NULL,
+  service_name TEXT NOT NULL,
+  layer_name TEXT NOT NULL,
+  layer_id INTEGER NOT NULL,
+  endpoint TEXT NOT NULL,
+  geometry_type TEXT,
+  spatial_reference TEXT NOT NULL DEFAULT '{}',
+  fields_json TEXT NOT NULL DEFAULT '[]',
+  status TEXT NOT NULL,
+  last_checked TEXT NOT NULL,
+  raw_metadata_json TEXT NOT NULL DEFAULT '{}',
+  UNIQUE(provider, endpoint, layer_id)
+);
+
+CREATE TABLE IF NOT EXISTS territorial_criteria (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  internal_id TEXT NOT NULL REFERENCES property_candidates(internal_id) ON DELETE CASCADE,
+  criterion_key TEXT NOT NULL,
+  criterion_label TEXT NOT NULL,
+  result TEXT NOT NULL,
+  value TEXT,
+  source TEXT,
+  endpoint TEXT,
+  layer_name TEXT,
+  checked_at TEXT NOT NULL,
+  evidence_json TEXT NOT NULL DEFAULT '{}',
+  confidence REAL NOT NULL DEFAULT 0,
+  observation TEXT,
+  UNIQUE(internal_id, criterion_key, source, layer_name)
+);
+
+CREATE INDEX IF NOT EXISTS idx_territorial_criteria_property
+  ON territorial_criteria (internal_id, checked_at);
 
 CREATE TABLE IF NOT EXISTS net_developable_exclusions (
   id INTEGER PRIMARY KEY AUTOINCREMENT,

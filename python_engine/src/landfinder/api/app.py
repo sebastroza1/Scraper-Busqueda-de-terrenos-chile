@@ -10,7 +10,14 @@ from fastapi.responses import StreamingResponse
 
 from landfinder import __version__
 from landfinder.api.jobs import JobManager, ensure_data_dirs, job_to_dict
-from landfinder.api.schemas import ManualClassificationUpdate, SearchRequest, SettingsUpdate
+from landfinder.api.schemas import (
+    GeocodeRequest,
+    ManualClassificationUpdate,
+    ManualPropertyCreate,
+    PropertyLocationUpdate,
+    SearchRequest,
+    SettingsUpdate,
+)
 from landfinder.catalog.chile import COMMUNES_BY_REGION, REGIONS, keyword_presets
 from landfinder.connectors.base import SearchQuery
 from landfinder.connectors.registry import default_connectors, default_enrichment_sources
@@ -18,15 +25,23 @@ from landfinder.core.credentials import diagnose_source_credentials
 from landfinder.core.logging import configure_logging
 from landfinder.core.settings import Settings, load_settings
 from landfinder.geospatial.ipt_catalog import MinvuIptCatalog
-from landfinder.geospatial.minvu import MinvuArcGisConnector
+from landfinder.geospatial.minvu import (
+    RISK_AREA_LAYERS,
+    URBAN_LIMIT_LAYERS,
+    MinvuArcGisConnector,
+)
 from landfinder.geospatial.territorial import TerritorialAnalyzer
+from landfinder.geocoding.providers import GeocodingRequest
+from landfinder.geocoding.resolver import GeolocationResolver
 from landfinder.reports.excel import export_properties_excel
 from landfinder.storage.repositories import (
     Database,
     GeospatialCacheRepository,
+    MinvuLayerRepository,
     PropertyRepository,
     ScrapingErrorRepository,
     SourceRecordAuditRepository,
+    utc_now,
 )
 
 
@@ -43,6 +58,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     minvu = MinvuArcGisConnector(cache=geospatial_cache)
     ipt_catalog = MinvuIptCatalog(minvu=minvu, cache=geospatial_cache)
     territorial = TerritorialAnalyzer(database=database, minvu=minvu, ipt_catalog=ipt_catalog)
+    geolocation = GeolocationResolver(database=database)
+    minvu_layers = MinvuLayerRepository(database)
     jobs = JobManager(settings)
 
     app = FastAPI(
@@ -53,6 +70,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.settings = settings
     app.state.jobs = jobs
     app.state.territorial = territorial
+    app.state.geolocation = geolocation
     app.state.minvu = minvu
     app.state.ipt_catalog = ipt_catalog
 
@@ -96,6 +114,34 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             (await connector.health()).model_dump(mode="json") for connector in default_connectors()
         ]
 
+    @app.get("/map/providers")
+    async def map_providers(_: Annotated[None, Depends(_require_token)]) -> dict:
+        providers = [
+            {
+                "provider_id": "osm",
+                "name": "OpenStreetMap",
+                "status": "ACTIVE",
+                "tile_url_template": "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
+                "attribution_url": "https://www.openstreetmap.org/copyright",
+                "attribution": "(c) OpenStreetMap contributors",
+                "requires_key": False,
+            },
+            {
+                "provider_id": "visicom",
+                "name": "Visicom Maps",
+                "status": "NOT_CONFIGURED",
+                "tile_url_template": None,
+                "attribution_url": None,
+                "attribution": None,
+                "requires_key": True,
+                "notes": "No concrete project reference/API contract was found in this repository.",
+            },
+        ]
+        selected = settings.map_provider if settings.map_provider in {"osm", "visicom"} else "osm"
+        if selected != "osm" and selected == "visicom":
+            selected = "osm"
+        return {"selected": selected, "fallback": "osm", "items": providers}
+
     @app.get("/catalog/regions")
     async def catalog_regions(_: Annotated[None, Depends(_require_token)]) -> dict:
         return {
@@ -131,12 +177,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     )
                 ],
             }
-        aliases = {
-            region["legacy_code"].upper(): region["code"]
-            for region in REGIONS
-        } | {
-            region["code"].upper(): region["code"]
-            for region in REGIONS
+        aliases = {region["legacy_code"].upper(): region["code"] for region in REGIONS} | {
+            region["code"].upper(): region["code"] for region in REGIONS
         }
         canonical_code = aliases.get(normalized)
         if not canonical_code:
@@ -296,12 +338,97 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "total": properties.count(),
         }
 
+    @app.post("/properties")
+    async def create_manual_property(
+        request: ManualPropertyCreate,
+        _: Annotated[None, Depends(_require_token)],
+    ) -> dict:
+        internal_id = properties.create_manual(request.model_dump())
+        item = properties.get(internal_id)
+        return {"status": "created", "property": item}
+
     @app.get("/properties/{property_id}")
     async def get_property(property_id: str, _: Annotated[None, Depends(_require_token)]) -> dict:
         item = properties.get(property_id)
         if not item:
             raise HTTPException(status_code=404, detail="property_not_found")
         return item
+
+    @app.post("/geocode")
+    async def geocode(
+        request: GeocodeRequest,
+        _: Annotated[None, Depends(_require_token)],
+    ) -> dict:
+        resolution = await geolocation.resolve_request(
+            "preview",
+            GeocodingRequest(**request.model_dump()),
+            persist=False,
+        )
+        return resolution.as_dict()
+
+    @app.post("/properties/{property_id}/location/resolve")
+    async def resolve_property_location(
+        property_id: str,
+        _: Annotated[None, Depends(_require_token)],
+    ) -> dict:
+        try:
+            return (await geolocation.resolve_property(property_id)).as_dict()
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="property_not_found") from exc
+
+    @app.put("/properties/{property_id}/location")
+    async def update_property_location(
+        property_id: str,
+        update: PropertyLocationUpdate,
+        _: Annotated[None, Depends(_require_token)],
+    ) -> dict:
+        try:
+            resolution = await geolocation.assign_manual(
+                property_id,
+                latitude=update.latitude,
+                longitude=update.longitude,
+                address=update.address,
+                region=update.region,
+                commune=update.commune,
+                precision=update.location_precision,
+            )
+            return resolution.as_dict()
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="property_not_found") from exc
+
+    @app.get("/properties/{property_id}/diagnostics")
+    async def property_diagnostics(
+        property_id: str,
+        _: Annotated[None, Depends(_require_token)],
+    ) -> dict:
+        item = properties.get(property_id)
+        if not item:
+            raise HTTPException(status_code=404, detail="property_not_found")
+        territory = territorial.summary(property_id)
+        return {
+            "property_id": property_id,
+            "datos_originales": item.get("source_records", []),
+            "datos_normalizados": item,
+            "ubicacion": {
+                "latitude": item.get("latitude"),
+                "longitude": item.get("longitude"),
+                "location_source": item.get("location_source") or item.get("geocoding_source"),
+                "location_method": item.get("location_method"),
+                "location_confidence": item.get("geocoding_confidence"),
+                "location_precision": item.get("location_precision"),
+                "geocoded_at": item.get("geocoded_at"),
+                "history": item.get("location_history", []),
+            },
+            "capas_minvu_consultadas": minvu_layers.list(limit=500),
+            "respuestas_territoriales": {
+                "evidence": territory.get("evidence", []),
+                "data_provenance": territory.get("data_provenance", []),
+                "geometry_metrics": territory.get("geometry_metrics"),
+            },
+            "criterios_evaluados": item.get("territorial_criteria", []),
+            "clasificacion_final": item.get("territorial_status"),
+            "errores_advertencias": errors.list_recent(),
+        }
 
     @app.get("/properties/{property_id}/territory")
     async def get_property_territory(
@@ -326,8 +453,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/gis/minvu/services")
     async def minvu_services(_: Annotated[None, Depends(_require_token)]) -> dict:
-        services = await minvu.discover_services("IPT")
-        return {"source": "IDE MINVU ArcGIS REST", "services": services}
+        try:
+            services = await minvu.discover_services("IPT")
+        except Exception as exc:  # noqa: BLE001
+            return _minvu_unavailable(exc, services=[])
+        return {"source": "IDE MINVU ArcGIS REST", "status": "OK", "services": services}
 
     @app.get("/gis/minvu/ipt/catalog")
     async def minvu_ipt_catalog(
@@ -335,10 +465,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         region: str | None = None,
         force_refresh: bool = False,
     ) -> dict:
-        return await ipt_catalog.build_catalog(
-            region_hint=region,
-            force_refresh=force_refresh,
-        )
+        try:
+            payload = await ipt_catalog.build_catalog(
+                region_hint=region,
+                force_refresh=force_refresh,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return _minvu_unavailable(exc, services=[])
+        payload.setdefault("status", "OK")
+        return payload
 
     @app.get("/gis/minvu/layer-audit")
     async def minvu_layer_audit(
@@ -347,11 +482,34 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         include_feature_counts: bool = False,
         force_refresh: bool = False,
     ) -> dict:
-        return await ipt_catalog.layer_audit(
-            region_hint=region,
-            include_feature_counts=include_feature_counts,
-            force_refresh=force_refresh,
-        )
+        try:
+            audit = await ipt_catalog.layer_audit(
+                region_hint=region,
+                include_feature_counts=include_feature_counts,
+                force_refresh=force_refresh,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return _minvu_unavailable(exc, layers=minvu_layers.list(limit=500))
+        _register_minvu_layers(minvu_layers, audit)
+        audit.setdefault("status", "OK")
+        return audit
+
+    @app.get("/gis/minvu/layers")
+    async def minvu_registered_layers(
+        _: Annotated[None, Depends(_require_token)],
+        refresh: bool = False,
+        region: str | None = None,
+        discover_catalog: bool = False,
+    ) -> dict:
+        if refresh:
+            try:
+                await _refresh_core_minvu_layers(minvu_layers, minvu)
+                if discover_catalog:
+                    audit = await ipt_catalog.layer_audit(region_hint=region, force_refresh=True)
+                    _register_minvu_layers(minvu_layers, audit)
+            except Exception as exc:  # noqa: BLE001
+                return _minvu_unavailable(exc, items=minvu_layers.list(limit=500))
+        return {"status": "OK", "items": minvu_layers.list(limit=500)}
 
     @app.post("/exports/excel")
     async def export_excel(_: Annotated[None, Depends(_require_token)]) -> dict:
@@ -368,10 +526,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "has_mercado_publico_ticket": bool(settings.mercado_publico_ticket),
             "has_mercadolibre_access_token": bool(settings.mercadolibre_access_token),
             "has_mercadolibre_refresh_token": bool(settings.mercadolibre_refresh_token),
-            "mercadolibre_access_token_expires_at": (
-                settings.mercadolibre_access_token_expires_at
-            ),
+            "mercadolibre_access_token_expires_at": (settings.mercadolibre_access_token_expires_at),
             "reference_property_id": settings.reference_property_id,
+            "map_provider": settings.map_provider,
             "progress_transport": "SSE",
             "progress_transport_reason": (
                 "SSE is sufficient for one-way local job progress and simpler "
@@ -398,6 +555,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             )
         if update.reference_property_id:
             settings.reference_property_id = update.reference_property_id
+        if update.map_provider is not None:
+            settings.map_provider = update.map_provider.strip().lower() or "osm"
         _sync_environment(settings)
         return await get_settings(None)
 
@@ -423,6 +582,90 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {"items": errors.list_recent()}
 
     return app
+
+
+def _minvu_unavailable(exc: Exception, **payload: object) -> dict:
+    return {
+        "source": "IDE MINVU ArcGIS REST",
+        "status": "UNAVAILABLE",
+        "message": f"{type(exc).__name__}: {_safe_external_error(exc)}",
+        **payload,
+    }
+
+
+def _safe_external_error(exc: Exception) -> str:
+    text = str(exc)
+    if len(text) > 240:
+        text = f"{text[:237]}..."
+    return text or "external service unavailable"
+
+
+async def _refresh_core_minvu_layers(
+    repository: MinvuLayerRepository,
+    minvu: MinvuArcGisConnector,
+) -> None:
+    rows = []
+    for layer in [*URBAN_LIMIT_LAYERS, *RISK_AREA_LAYERS]:
+        service_name = layer.service_url.rstrip("/").split("/")[-2]
+        try:
+            metadata = await minvu.layer_metadata(layer.service_url, layer.layer_id)
+            rows.append(
+                {
+                    "provider": "IDE MINVU",
+                    "service_name": service_name,
+                    "layer_name": metadata.get("name") or layer.layer_name,
+                    "layer_id": layer.layer_id,
+                    "endpoint": layer.service_url,
+                    "geometry_type": metadata.get("geometryType"),
+                    "spatial_reference": metadata.get("extent", {}).get("spatialReference")
+                    or metadata.get("sourceSpatialReference")
+                    or {},
+                    "fields": metadata.get("fields") or [],
+                    "status": "QUERYABLE"
+                    if "Query" in str(metadata.get("capabilities"))
+                    else "DISCOVERED",
+                    "last_checked": utc_now().isoformat(),
+                    "raw_metadata": metadata,
+                }
+            )
+        except Exception as exc:  # noqa: BLE001
+            rows.append(
+                {
+                    "provider": "IDE MINVU",
+                    "service_name": service_name,
+                    "layer_name": layer.layer_name,
+                    "layer_id": layer.layer_id,
+                    "endpoint": layer.service_url,
+                    "status": "UNAVAILABLE",
+                    "last_checked": utc_now().isoformat(),
+                    "raw_metadata": {"error": f"{type(exc).__name__}: {_safe_external_error(exc)}"},
+                }
+            )
+    repository.upsert_many(rows)
+
+
+def _register_minvu_layers(repository: MinvuLayerRepository, audit: dict) -> None:
+    rows = []
+    for layer in audit.get("layers") or []:
+        if not isinstance(layer, dict):
+            continue
+        rows.append(
+            {
+                "provider": "IDE MINVU",
+                "service_name": layer.get("service_name"),
+                "layer_name": layer.get("layer_name"),
+                "layer_id": layer.get("layer_id"),
+                "endpoint": layer.get("service_url"),
+                "geometry_type": layer.get("geometry_type"),
+                "spatial_reference": layer.get("spatial_reference"),
+                "fields": layer.get("fields") or [],
+                "status": "QUERYABLE" if layer.get("is_queryable") else "DISCOVERED",
+                "last_checked": layer.get("last_checked") or audit.get("retrieved_at"),
+                "raw_metadata": layer,
+            }
+        )
+    if rows:
+        repository.upsert_many(rows)
 
 
 async def _require_token(

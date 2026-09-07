@@ -22,6 +22,10 @@ class LandfinderMapScreen extends StatelessWidget {
     required this.onZoningLayerChanged,
     required this.onSelectProperty,
     required this.onRefreshTerritory,
+    this.tileUrlTemplate = 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+    this.tileAttributionUrl = 'https://www.openstreetmap.org/copyright',
+    this.onMapTap,
+    this.onViewTerritory,
   });
 
   final List<Map<String, dynamic>> properties;
@@ -38,6 +42,10 @@ class LandfinderMapScreen extends StatelessWidget {
   final ValueChanged<bool> onZoningLayerChanged;
   final ValueChanged<Map<String, dynamic>> onSelectProperty;
   final VoidCallback onRefreshTerritory;
+  final String tileUrlTemplate;
+  final String tileAttributionUrl;
+  final ValueChanged<LatLng>? onMapTap;
+  final ValueChanged<Map<String, dynamic>>? onViewTerritory;
 
   @override
   Widget build(BuildContext context) {
@@ -96,6 +104,20 @@ class LandfinderMapScreen extends StatelessWidget {
                 label: const Text('Zonificacion'),
                 onSelected: onZoningLayerChanged,
               ),
+              const FilterChip(
+                selected: false,
+                avatar: Icon(Icons.account_balance_outlined, size: 18),
+                label: Text('Equipamiento'),
+                onSelected: null,
+                tooltip: 'Fuente aun no integrada',
+              ),
+              const FilterChip(
+                selected: false,
+                avatar: Icon(Icons.alt_route_outlined, size: 18),
+                label: Text('Infraestructura'),
+                onSelected: null,
+                tooltip: 'Fuente aun no integrada',
+              ),
               FilledButton.icon(
                 onPressed:
                     selected == null || !selectedHasPoint || refreshingTerritory
@@ -132,11 +154,13 @@ class LandfinderMapScreen extends StatelessWidget {
                       initialZoom: _pointCount(properties) <= 1 ? 13 : 10,
                       minZoom: 4,
                       maxZoom: 19,
+                      onTap: onMapTap == null
+                          ? null
+                          : (_, point) => onMapTap!(point),
                     ),
                     children: [
                       TileLayer(
-                        urlTemplate:
-                            'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+                        urlTemplate: tileUrlTemplate,
                         userAgentPackageName: 'cl.landfinder.desktop',
                       ),
                       if (urbanPolygons.isNotEmpty)
@@ -184,8 +208,7 @@ class LandfinderMapScreen extends StatelessWidget {
                     left: 12,
                     bottom: 12,
                     child: _MapAttribution(
-                      onTap: () =>
-                          _openUri('https://www.openstreetmap.org/copyright'),
+                      onTap: () => _openUri(tileAttributionUrl),
                     ),
                   ),
                   Positioned(
@@ -243,11 +266,14 @@ class LandfinderMapScreen extends StatelessWidget {
           Marker(
             point: _propertyPoint(property)!,
             width: _isSelected(property, selected) ? 230 : 46,
-            height: _isSelected(property, selected) ? 112 : 46,
+            height: _isSelected(property, selected) ? 178 : 46,
             child: _isSelected(property, selected)
                 ? _SelectedPropertyMarker(
                     property: property,
                     onTap: () => onSelectProperty(property),
+                    onViewTerritory: onViewTerritory == null
+                        ? null
+                        : () => onViewTerritory!(property),
                   )
                 : Tooltip(
                     message: _propertyTitle(property),
@@ -255,7 +281,7 @@ class LandfinderMapScreen extends StatelessWidget {
                       onPressed: () => onSelectProperty(property),
                       icon: const Icon(Icons.location_on_outlined, size: 20),
                       style: IconButton.styleFrom(
-                        backgroundColor: const Color(0xFF0F766E),
+                        backgroundColor: _markerColor(property),
                         foregroundColor: Colors.white,
                       ),
                     ),
@@ -274,10 +300,15 @@ class LandfinderMapScreen extends StatelessWidget {
 }
 
 class _SelectedPropertyMarker extends StatelessWidget {
-  const _SelectedPropertyMarker({required this.property, required this.onTap});
+  const _SelectedPropertyMarker({
+    required this.property,
+    required this.onTap,
+    required this.onViewTerritory,
+  });
 
   final Map<String, dynamic> property;
   final VoidCallback onTap;
+  final VoidCallback? onViewTerritory;
 
   @override
   Widget build(BuildContext context) {
@@ -292,11 +323,11 @@ class _SelectedPropertyMarker extends StatelessWidget {
           child: Row(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              const Padding(
-                padding: EdgeInsets.only(top: 3),
+              Padding(
+                padding: const EdgeInsets.only(top: 3),
                 child: Icon(
                   Icons.location_on,
-                  color: Color(0xFFB45309),
+                  color: _markerColor(property),
                   size: 22,
                 ),
               ),
@@ -330,6 +361,44 @@ class _SelectedPropertyMarker extends StatelessWidget {
                         color: const Color(0xFF64748B),
                       ),
                     ),
+                    Text(
+                      _coordinatesText(property),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                        color: const Color(0xFF64748B),
+                      ),
+                    ),
+                    Text(
+                      _knownText(property['region']),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                        color: const Color(0xFF64748B),
+                      ),
+                    ),
+                    Text(
+                      '${_locationLabel(property)} | ${_knownText(property['territorial_status'])}',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                        color: _markerColor(property),
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    if (onViewTerritory != null)
+                      Align(
+                        alignment: Alignment.centerLeft,
+                        child: TextButton(
+                          onPressed: onViewTerritory,
+                          style: TextButton.styleFrom(
+                            padding: EdgeInsets.zero,
+                            minimumSize: const Size(0, 24),
+                            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                          ),
+                          child: const Text('Ver analisis territorial'),
+                        ),
+                      ),
                   ],
                 ),
               ),
@@ -736,6 +805,48 @@ String _knownNumber(dynamic value, {String suffix = ''}) {
       ? number.round().toString()
       : number.toStringAsFixed(2);
   return '$formatted$suffix';
+}
+
+String _coordinatesText(Map<String, dynamic> property) {
+  final latitude = _asDouble(property['latitude']);
+  final longitude = _asDouble(property['longitude']);
+  if (latitude == null || longitude == null) {
+    return 'Coordenadas: sin informacion';
+  }
+  return 'Coord: ${latitude.toStringAsFixed(6)}, ${longitude.toStringAsFixed(6)}';
+}
+
+Color _markerColor(Map<String, dynamic> property) {
+  final method = property['location_method']?.toString().toLowerCase();
+  final precision = property['location_precision']?.toString() ?? 'UNKNOWN';
+  if (method == 'manual') {
+    return const Color(0xFF7C3AED);
+  }
+  if (precision == 'EXACT' || precision == 'APPROXIMATE_PROPERTY') {
+    return const Color(0xFF047857);
+  }
+  if (precision == 'PROPERTY_COMMUNE_CENTROID' || precision == 'CENTROID') {
+    return const Color(0xFFB45309);
+  }
+  return const Color(0xFF64748B);
+}
+
+String _locationLabel(Map<String, dynamic> property) {
+  final method = property['location_method']?.toString().toLowerCase();
+  final precision = property['location_precision']?.toString();
+  if (method == 'manual') {
+    return 'Manual';
+  }
+  if (precision == 'EXACT') {
+    return 'Exacta';
+  }
+  if (precision == 'APPROXIMATE_PROPERTY' || precision == 'APPROXIMATE') {
+    return 'Aproximada';
+  }
+  if (precision == 'PROPERTY_COMMUNE_CENTROID' || precision == 'CENTROID') {
+    return 'Centroide';
+  }
+  return 'Sin precision';
 }
 
 Future<void> _openUri(String url) async {

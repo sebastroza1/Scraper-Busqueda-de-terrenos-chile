@@ -122,11 +122,13 @@ class _Header extends StatelessWidget {
     required this.title,
     required this.subtitle,
     required this.onRefresh,
+    this.actions = const [],
   });
 
   final String title;
   final String subtitle;
   final Future<void> Function() onRefresh;
+  final List<Widget> actions;
 
   @override
   Widget build(BuildContext context) {
@@ -157,6 +159,7 @@ class _Header extends StatelessWidget {
           onPressed: onRefresh,
           icon: const Icon(Icons.refresh_outlined),
         ),
+        if (actions.isNotEmpty) ...[const SizedBox(width: 8), ...actions],
       ],
     );
   }

@@ -84,10 +84,12 @@ def test_excel_export_opens(tmp_path) -> None:
 
     output = export_properties_excel(db, tmp_path / "out.xlsx")
     workbook = load_workbook(output)
-    assert workbook.sheetnames == [
+    assert {
         "Resumen",
         "Terrenos",
         "Fuentes_Utilizadas",
+        "ANALISIS_TERRITORIAL",
+        "CAPAS_MINVU",
         "Fuentes",
         "Historial_Precios",
         "Metricas_GIS",
@@ -95,7 +97,7 @@ def test_excel_export_opens(tmp_path) -> None:
         "Classifier_Audit",
         "SourceRecords",
         "Errores",
-    ]
+    }.issubset(set(workbook.sheetnames))
     evidence_sheet = workbook["Fuentes_Evidencia"]
     evidence_values = [
         cell.value

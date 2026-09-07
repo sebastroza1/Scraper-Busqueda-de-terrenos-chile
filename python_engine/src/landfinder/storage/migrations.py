@@ -5,7 +5,7 @@ from pathlib import Path
 
 from landfinder.storage.database import SCHEMA_PATH
 
-CURRENT_SCHEMA_VERSION = 6
+CURRENT_SCHEMA_VERSION = 7
 
 
 def migrate_database(database_path: str | Path) -> None:
@@ -47,6 +47,10 @@ def migrate_database(database_path: str | Path) -> None:
         if 6 not in applied:
             _apply_v6(connection)
             connection.execute("INSERT OR IGNORE INTO schema_migrations(version) VALUES (6)")
+
+        if 7 not in applied:
+            _apply_v7(connection)
+            connection.execute("INSERT OR IGNORE INTO schema_migrations(version) VALUES (7)")
 
 
 def _apply_v2(connection: sqlite3.Connection) -> None:
@@ -300,14 +304,139 @@ def _apply_v6(connection: sqlite3.Connection) -> None:
         _add_column_if_missing(connection, "source_records", column, definition)
 
 
+def _apply_v7(connection: sqlite3.Connection) -> None:
+    property_columns = {
+        "location_source": "TEXT",
+        "location_method": "TEXT",
+        "geocoded_at": "TEXT",
+        "territorial_status": "TEXT NOT NULL DEFAULT 'SIN_INFORMACION_SUFICIENTE'",
+        "territorial_checked_at": "TEXT",
+        "territorial_summary_json": "TEXT NOT NULL DEFAULT '{}'",
+        "candidate_status": "TEXT NOT NULL DEFAULT 'ACTIVE'",
+        "manual_notes": "TEXT",
+    }
+    for column, definition in property_columns.items():
+        _add_column_if_missing(connection, "property_candidates", column, definition)
+
+    connection.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS geocoding_cache (
+          cache_key TEXT PRIMARY KEY,
+          provider TEXT NOT NULL,
+          query_text TEXT NOT NULL,
+          normalized_query TEXT NOT NULL,
+          request_json TEXT NOT NULL DEFAULT '{}',
+          response_json TEXT NOT NULL DEFAULT '{}',
+          latitude REAL,
+          longitude REAL,
+          display_name TEXT,
+          location_precision TEXT NOT NULL DEFAULT 'UNKNOWN',
+          location_method TEXT NOT NULL,
+          confidence REAL NOT NULL DEFAULT 0,
+          source_url TEXT,
+          created_at TEXT NOT NULL,
+          last_used_at TEXT NOT NULL,
+          expires_at TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS property_location_history (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          internal_id TEXT NOT NULL REFERENCES property_candidates(internal_id) ON DELETE CASCADE,
+          latitude REAL,
+          longitude REAL,
+          location_source TEXT,
+          location_method TEXT NOT NULL,
+          location_precision TEXT NOT NULL DEFAULT 'UNKNOWN',
+          location_confidence REAL NOT NULL DEFAULT 0,
+          address TEXT,
+          region TEXT,
+          commune TEXT,
+          raw_result_json TEXT NOT NULL DEFAULT '{}',
+          assigned_by TEXT NOT NULL DEFAULT 'system',
+          created_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS minvu_layers (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          provider TEXT NOT NULL,
+          service_name TEXT NOT NULL,
+          layer_name TEXT NOT NULL,
+          layer_id INTEGER NOT NULL,
+          endpoint TEXT NOT NULL,
+          geometry_type TEXT,
+          spatial_reference TEXT NOT NULL DEFAULT '{}',
+          fields_json TEXT NOT NULL DEFAULT '[]',
+          status TEXT NOT NULL,
+          last_checked TEXT NOT NULL,
+          raw_metadata_json TEXT NOT NULL DEFAULT '{}',
+          UNIQUE(provider, endpoint, layer_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS territorial_criteria (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          internal_id TEXT NOT NULL REFERENCES property_candidates(internal_id) ON DELETE CASCADE,
+          criterion_key TEXT NOT NULL,
+          criterion_label TEXT NOT NULL,
+          result TEXT NOT NULL,
+          value TEXT,
+          source TEXT,
+          endpoint TEXT,
+          layer_name TEXT,
+          checked_at TEXT NOT NULL,
+          evidence_json TEXT NOT NULL DEFAULT '{}',
+          confidence REAL NOT NULL DEFAULT 0,
+          observation TEXT,
+          UNIQUE(internal_id, criterion_key, source, layer_name)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_property_candidates_location_method
+          ON property_candidates (location_method, location_precision);
+
+        CREATE INDEX IF NOT EXISTS idx_territorial_criteria_property
+          ON territorial_criteria (internal_id, checked_at);
+        """
+    )
+    _redact_historical_scraping_errors(connection)
+
+
+def _redact_historical_scraping_errors(connection: sqlite3.Connection) -> None:
+    rows = connection.execute("SELECT id, message, exception FROM scraping_errors").fetchall()
+    for row in rows:
+        message = _sanitize_secret_text(row[1])
+        exception = _sanitize_secret_text(row[2])
+        if message != row[1] or exception != row[2]:
+            connection.execute(
+                "UPDATE scraping_errors SET message = ?, exception = ? WHERE id = ?",
+                (message, exception, row[0]),
+            )
+
+
 def _add_column_if_missing(
     connection: sqlite3.Connection,
     table_name: str,
     column_name: str,
     definition: str,
 ) -> None:
-    columns = {
-        row[1] for row in connection.execute(f"PRAGMA table_info({table_name})").fetchall()
-    }
+    columns = {row[1] for row in connection.execute(f"PRAGMA table_info({table_name})").fetchall()}
     if column_name not in columns:
         connection.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {definition}")
+
+
+def _sanitize_secret_text(value: object) -> str | None:
+    if value in (None, ""):
+        return None
+    import re
+
+    text = str(value)
+    replacements = [
+        (r"(?i)(ticket=)[^&\s'\"}\]]+", r"\1REDACTED"),
+        (r"(?i)(apikey=)[^&\s'\"}\]]+", r"\1REDACTED"),
+        (r"(?i)(access_token=)[^&\s'\"}\]]+", r"\1REDACTED"),
+        (r"(?i)(refresh_token=)[^&\s'\"}\]]+", r"\1REDACTED"),
+        (r"(?i)(password=)[^&\s'\"}\]]+", r"\1REDACTED"),
+        (r"(?i)(client_secret=)[^&\s'\"}\]]+", r"\1REDACTED"),
+        (r"(?i)(authorization:\s*bearer\s+)[^,\s'\"}\]]+", r"\1REDACTED"),
+    ]
+    for pattern, replacement in replacements:
+        text = re.sub(pattern, replacement, text)
+    return text

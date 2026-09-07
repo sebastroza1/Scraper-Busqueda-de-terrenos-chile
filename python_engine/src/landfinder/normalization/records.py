@@ -55,10 +55,17 @@ def normalize_raw_record(raw: RawSourceRecord) -> NormalizedPropertyRecord:
         latitude=raw.latitude,
         longitude=raw.longitude,
         location_precision=location_precision,
+        location_source=raw.source_id
+        if raw.latitude is not None and raw.longitude is not None
+        else None,
+        location_method=(
+            "source_coordinates" if raw.latitude is not None and raw.longitude is not None else None
+        ),
+        geocoded_at=raw.retrieved_at
+        if raw.latitude is not None and raw.longitude is not None
+        else None,
         geocoding_source=(
-            "source_coordinates"
-            if raw.latitude is not None and raw.longitude is not None
-            else None
+            "source_coordinates" if raw.latitude is not None and raw.longitude is not None else None
         ),
         geocoding_confidence=0.55 if location_precision == "APPROXIMATE_PROPERTY" else 0,
         gross_area_m2=area.value_m2 if area else None,

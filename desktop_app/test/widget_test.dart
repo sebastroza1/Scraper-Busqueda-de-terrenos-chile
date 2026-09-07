@@ -167,6 +167,25 @@ class _FakeApi implements LandfinderApi {
       'has_cmf_api_key': false,
       'has_mercado_publico_ticket': false,
       'has_mercadolibre_access_token': true,
+      'map_provider': 'osm',
+    };
+  }
+
+  @override
+  Future<Map<String, dynamic>> mapProviders() async {
+    return {
+      'selected': 'osm',
+      'fallback': 'osm',
+      'items': [
+        {
+          'provider_id': 'osm',
+          'name': 'OpenStreetMap',
+          'status': 'ACTIVE',
+          'tile_url_template': 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+          'attribution_url': 'https://www.openstreetmap.org/copyright',
+          'requires_key': false,
+        },
+      ],
     };
   }
 
@@ -175,6 +194,77 @@ class _FakeApi implements LandfinderApi {
     Map<String, dynamic> values,
   ) async {
     return settings();
+  }
+
+  @override
+  Future<Map<String, dynamic>> createManualProperty(
+    Map<String, dynamic> values,
+  ) async {
+    return {
+      'property': {
+        'internal_id': 'manual-1',
+        'publication_title': values['title'],
+        'source': 'manual',
+        'region': values['region'],
+        'commune': values['commune'],
+        'latitude': values['latitude'],
+        'longitude': values['longitude'],
+        'location_method': values['latitude'] == null ? null : 'manual',
+        'territorial_status': 'SIN_INFORMACION_SUFICIENTE',
+      },
+    };
+  }
+
+  @override
+  Future<Map<String, dynamic>> geocode(Map<String, dynamic> values) async {
+    return {
+      'candidates': [
+        {
+          'latitude': -33.5,
+          'longitude': -70.7,
+          'display_name': 'Maipu, Region Metropolitana, Chile',
+          'location_precision': 'APPROXIMATE',
+        },
+      ],
+    };
+  }
+
+  @override
+  Future<Map<String, dynamic>> assignPropertyLocation(
+    String propertyId,
+    Map<String, dynamic> values,
+  ) async {
+    return {
+      'property_id': propertyId,
+      'latitude': values['latitude'],
+      'longitude': values['longitude'],
+      'location_method': 'manual',
+    };
+  }
+
+  @override
+  Future<Map<String, dynamic>> resolvePropertyLocation(
+    String propertyId,
+  ) async {
+    return {
+      'property_id': propertyId,
+      'status': 'resolved',
+      'location_method': 'nominatim',
+    };
+  }
+
+  @override
+  Future<Map<String, dynamic>> propertyDiagnostics(String propertyId) async {
+    return {
+      'property_id': propertyId,
+      'original_data': {},
+      'normalized_data': {},
+      'location': {},
+      'territorial_responses': {},
+      'criteria': [],
+      'final_classification': 'SIN_INFORMACION_SUFICIENTE',
+      'warnings': [],
+    };
   }
 
   @override
@@ -352,6 +442,11 @@ class _FakeApi implements LandfinderApi {
       'region_hint': region,
       'layers': [],
     };
+  }
+
+  @override
+  Future<Map<String, dynamic>> minvuLayers({bool refresh = false}) async {
+    return {'items': []};
   }
 
   @override

@@ -22,6 +22,7 @@ class Settings(BaseModel):
     mercadolibre_access_token_expires_at: str | None = None
     reference_property_id: str | None = None
     image_max_bytes: int = 8 * 1024 * 1024
+    map_provider: str = "osm"
 
 
 def load_settings(
@@ -49,9 +50,8 @@ def load_settings(
         mercado_publico_ticket=os.getenv("MERCADO_PUBLICO_TICKET"),
         mercadolibre_access_token=os.getenv("MERCADOLIBRE_ACCESS_TOKEN"),
         mercadolibre_refresh_token=os.getenv("MERCADOLIBRE_REFRESH_TOKEN"),
-        mercadolibre_access_token_expires_at=os.getenv(
-            "MERCADOLIBRE_ACCESS_TOKEN_EXPIRES_AT"
-        ),
+        mercadolibre_access_token_expires_at=os.getenv("MERCADOLIBRE_ACCESS_TOKEN_EXPIRES_AT"),
         reference_property_id=os.getenv("LAND_FINDER_REFERENCE_PROPERTY_ID")
         or os.getenv("LANDFINDER_REFERENCE_PROPERTY_ID"),
+        map_provider=os.getenv("MAP_PROVIDER", "osm").strip().lower() or "osm",
     )

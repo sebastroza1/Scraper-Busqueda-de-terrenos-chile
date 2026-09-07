@@ -12,6 +12,7 @@ from landfinder.deduplication.engine import DeduplicationEngine
 from landfinder.geospatial.ipt_catalog import MinvuIptCatalog
 from landfinder.geospatial.minvu import MinvuArcGisConnector
 from landfinder.geospatial.territorial import TerritorialAnalyzer
+from landfinder.geocoding.resolver import GeolocationResolver
 from landfinder.images.processor import ImageProcessor
 from landfinder.models.enums import (
     JobStatus,
@@ -60,6 +61,7 @@ class SearchPipeline:
         self.errors = ScrapingErrorRepository(self.database)
         self.source_runs = SourceRunStatusRepository(self.database)
         self.source_records = SourceRecordAuditRepository(self.database)
+        self.geolocation = GeolocationResolver(database=self.database)
 
     async def run(
         self,
@@ -554,6 +556,54 @@ class SearchPipeline:
             processed=persisted,
         )
 
+        await _emit(
+            events,
+            job_id,
+            PipelineEventType.STARTED,
+            PipelineStage.GEOCODING,
+            "Resolving property locations",
+            total=len(persisted_ids),
+        )
+        geocoded = 0
+        for index, property_id in enumerate(sorted(persisted_ids), start=1):
+            if cancellation.is_cancelled:
+                return await self._cancel(job_id, events)
+            property_record = self.properties.get(property_id)
+            if not property_record or _has_coordinates(property_record):
+                geocoded += 1 if property_record and _has_coordinates(property_record) else 0
+                continue
+            resolution = await self.geolocation.resolve_property(property_id, persist=True)
+            if resolution.result:
+                geocoded += 1
+            for warning in resolution.warnings:
+                await _emit(
+                    events,
+                    job_id,
+                    PipelineEventType.WARNING,
+                    PipelineStage.GEOCODING,
+                    warning,
+                    property_id=property_id,
+                )
+            await _emit(
+                events,
+                job_id,
+                PipelineEventType.PROGRESS,
+                PipelineStage.GEOCODING,
+                "Location resolution",
+                processed=index,
+                total=len(persisted_ids),
+                property_id=property_id,
+            )
+        await _emit(
+            events,
+            job_id,
+            PipelineEventType.COMPLETED,
+            PipelineStage.GEOCODING,
+            "Location resolution completed",
+            processed=geocoded,
+            total=len(persisted_ids),
+        )
+
         for connector in self.connectors:
             if connector.source_id not in enabled_search_sources:
                 continue
@@ -847,9 +897,7 @@ def _audit_records_from_raw(records: list[dict[str, Any]]) -> list[dict[str, Any
     for item in records:
         raw_payload = item.get("raw_payload") if isinstance(item.get("raw_payload"), dict) else {}
         landfinder = (
-            raw_payload.get("landfinder")
-            if isinstance(raw_payload.get("landfinder"), dict)
-            else {}
+            raw_payload.get("landfinder") if isinstance(raw_payload.get("landfinder"), dict) else {}
         )
         audit_records.append(
             {
@@ -929,10 +977,16 @@ def _has_coordinates(property_record: dict[str, Any]) -> bool:
 def _matches_query_filters(record: NormalizedPropertyRecord, query: SearchQuery) -> bool:
     area = record.gross_area_m2
     if query.gross_area_min_m2 is not None:
-        if area is None or area < Decimal(str(query.gross_area_min_m2)):
+        if area is None:
+            if "SURFACE_PENDING" not in record.observations:
+                record.observations.append("SURFACE_PENDING")
+        elif area < Decimal(str(query.gross_area_min_m2)):
             return False
     if query.gross_area_max_m2 is not None:
-        if area is None or area > Decimal(str(query.gross_area_max_m2)):
+        if area is None:
+            if "SURFACE_PENDING" not in record.observations:
+                record.observations.append("SURFACE_PENDING")
+        elif area > Decimal(str(query.gross_area_max_m2)):
             return False
 
     price = record.price_clp

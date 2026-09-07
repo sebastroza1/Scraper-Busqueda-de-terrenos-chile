@@ -105,6 +105,18 @@ def export_properties_excel(database_path: str | Path, output_path: str | Path) 
             row["internal_id"]: dict(row)
             for row in connection.execute("SELECT * FROM images").fetchall()
         }
+        territorial_criteria = [
+            dict(row)
+            for row in connection.execute(
+                "SELECT * FROM territorial_criteria ORDER BY checked_at DESC"
+            ).fetchall()
+        ]
+        minvu_layers = [
+            dict(row)
+            for row in connection.execute(
+                "SELECT * FROM minvu_layers ORDER BY last_checked DESC, service_name, layer_id"
+            ).fetchall()
+        ]
 
     workbook = Workbook()
     summary = workbook.active
@@ -131,6 +143,11 @@ def export_properties_excel(database_path: str | Path, output_path: str | Path) 
     _write_table(workbook.create_sheet("Fuentes"), sources)
     _write_table(workbook.create_sheet("Historial_Precios"), price_history)
     _write_table(workbook.create_sheet("Metricas_GIS"), geometry_metrics)
+    _write_territorial_analysis(
+        workbook.create_sheet("ANALISIS_TERRITORIAL"),
+        territorial_criteria,
+    )
+    _write_minvu_layers(workbook.create_sheet("CAPAS_MINVU"), minvu_layers)
     _write_evidence(workbook.create_sheet("Fuentes_Evidencia"), evidence, provenance)
     _write_classifier_audit(workbook.create_sheet("Classifier_Audit"), source_audit)
     _write_source_records(workbook.create_sheet("SourceRecords"), source_audit)
@@ -224,9 +241,17 @@ def _write_properties(
         "UF/m2",
         "Latitud",
         "Longitud",
+        "location_method",
+        "location_confidence",
+        "location_source",
         "Estado geometria",
         "Tipo geometria",
         "Fuente geometria",
+        "territorial_status",
+        "urban_limit",
+        "zoning",
+        "risk_status",
+        "territorial_checked_at",
         "Superficie GIS m2",
         "Perimetro GIS m",
         "Superficie oficial m2",
@@ -252,9 +277,7 @@ def _write_properties(
             item.get("publication_title"),
             item.get("source"),
             _source_label(item.get("source")),
-            "; ".join(
-                sorted({_source_label(row.get("source")) for row in property_sources})
-            ),
+            "; ".join(sorted({_source_label(row.get("source")) for row in property_sources})),
             "; ".join(
                 sorted(
                     {
@@ -290,9 +313,17 @@ def _write_properties(
             item.get("price_uf_m2_gross"),
             item.get("latitude"),
             item.get("longitude"),
+            item.get("location_method"),
+            item.get("geocoding_confidence"),
+            item.get("location_source") or item.get("geocoding_source"),
             item.get("geometry_status"),
             item.get("geometry_type"),
             item.get("geometry_source"),
+            item.get("territorial_status"),
+            _territorial_value(item, "urban_limit"),
+            _territorial_value(item, "prc_zoning"),
+            _territorial_value(item, "risk"),
+            item.get("territorial_checked_at"),
             item.get("geometry_area_m2"),
             item.get("geometry_perimeter_m"),
             item.get("official_area_m2"),
@@ -344,6 +375,14 @@ def _write_properties(
         18,
         16,
         18,
+        18,
+        16,
+        20,
+        26,
+        20,
+        18,
+        20,
+        26,
         16,
         24,
         24,
@@ -391,6 +430,86 @@ def _write_used_sources(sheet, rows: list[dict[str, Any]]) -> None:
     sheet.freeze_panes = "A2"
     sheet.auto_filter.ref = f"A1:I{max(2, len(rows) + 1)}"
     widths = [28, 20, 14, 24, 24, 24, 42, 20, 28]
+    for index, width in enumerate(widths, start=1):
+        sheet.column_dimensions[get_column_letter(index)].width = width
+
+
+def _write_territorial_analysis(sheet, rows: list[dict[str, Any]]) -> None:
+    headers = [
+        "Property_ID",
+        "Criterio",
+        "Resultado",
+        "Valor",
+        "Fuente",
+        "Endpoint",
+        "Capa",
+        "Fecha",
+        "Confianza",
+        "Observacion",
+        "Evidencia",
+    ]
+    sheet.append(headers)
+    _style_header(sheet)
+    for row in rows:
+        sheet.append(
+            [
+                row.get("internal_id"),
+                row.get("criterion_label"),
+                row.get("result"),
+                _json_value(row.get("value")),
+                row.get("source"),
+                _sanitize_url(row.get("endpoint")),
+                row.get("layer_name"),
+                row.get("checked_at"),
+                row.get("confidence"),
+                row.get("observation"),
+                _json_value(row.get("evidence_json")),
+            ]
+        )
+    if not rows:
+        sheet.append(["Sin registros"] + [""] * (len(headers) - 1))
+    sheet.freeze_panes = "A2"
+    sheet.auto_filter.ref = f"A1:K{max(2, len(rows) + 1)}"
+    widths = [38, 30, 18, 28, 24, 48, 28, 26, 12, 42, 56]
+    for index, width in enumerate(widths, start=1):
+        sheet.column_dimensions[get_column_letter(index)].width = width
+
+
+def _write_minvu_layers(sheet, rows: list[dict[str, Any]]) -> None:
+    headers = [
+        "Provider",
+        "Servicio",
+        "Capa",
+        "Layer_ID",
+        "Endpoint",
+        "Geometry_Type",
+        "Spatial_Reference",
+        "Fields",
+        "Estado",
+        "Last_Checked",
+    ]
+    sheet.append(headers)
+    _style_header(sheet)
+    for row in rows:
+        sheet.append(
+            [
+                row.get("provider"),
+                row.get("service_name"),
+                row.get("layer_name"),
+                row.get("layer_id"),
+                _sanitize_url(row.get("endpoint")),
+                row.get("geometry_type"),
+                _json_value(row.get("spatial_reference")),
+                _json_value(row.get("fields_json")),
+                row.get("status"),
+                row.get("last_checked"),
+            ]
+        )
+    if not rows:
+        sheet.append(["Sin registros"] + [""] * (len(headers) - 1))
+    sheet.freeze_panes = "A2"
+    sheet.auto_filter.ref = f"A1:J{max(2, len(rows) + 1)}"
+    widths = [18, 34, 34, 12, 52, 20, 28, 56, 18, 26]
     for index, width in enumerate(widths, start=1):
         sheet.column_dimensions[get_column_letter(index)].width = width
 
@@ -712,6 +831,21 @@ def _json_value(value: Any) -> str:
             return value
         return json.dumps(decoded, ensure_ascii=True)
     return json.dumps(value, ensure_ascii=True, default=str)
+
+
+def _territorial_value(item: dict[str, Any], criterion_key: str) -> str:
+    summary = item.get("territorial_summary_json")
+    if not summary:
+        return ""
+    try:
+        decoded = json.loads(str(summary))
+    except json.JSONDecodeError:
+        return ""
+    for criterion in decoded.get("criteria") or []:
+        if isinstance(criterion, dict) and criterion.get("criterion_key") == criterion_key:
+            value = criterion.get("value")
+            return _json_value(value)
+    return ""
 
 
 def _sanitize_url(value: Any) -> str:

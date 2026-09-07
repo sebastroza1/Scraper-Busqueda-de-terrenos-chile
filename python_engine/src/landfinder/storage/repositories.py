@@ -84,6 +84,9 @@ class PropertyRepository:
                 record.latitude,
                 record.longitude,
                 record.location_precision,
+                record.location_source,
+                record.location_method,
+                record.geocoded_at.isoformat() if record.geocoded_at else None,
                 record.geocoding_source,
                 record.geocoding_confidence,
                 _num(record.price_clp),
@@ -120,20 +123,23 @@ class PropertyRepository:
                   publication_title, publication_date, last_seen, seller_type, broker,
                   listing_status, region, province, commune, original_address,
                   normalized_address, latitude, longitude, location_precision,
-                  geocoding_source, geocoding_confidence, asking_price_clp,
-                  asking_price_uf, uf_date, uf_rate, uf_rate_date, uf_source,
-                  uf_retrieved_at, uf_cache_hit, gross_area_m2, advertised_area_m2,
-                  price_uf_m2_gross, estimated_usable_area_m2, price_uf_m2_usable,
+                  location_source, location_method, geocoded_at, geocoding_source,
+                  geocoding_confidence, asking_price_clp, asking_price_uf, uf_date,
+                  uf_rate, uf_rate_date, uf_source, uf_retrieved_at, uf_cache_hit,
+                  gross_area_m2, advertised_area_m2, price_uf_m2_gross,
+                  estimated_usable_area_m2, price_uf_m2_usable,
                   estimated_net_developable_area_m2, net_developable_ratio,
                   usable_price_uf_m2, estimated_dwelling_capacity,
-                  estimated_land_cost_per_dwelling, auction_minimum, auction_guarantee,
-                  auction_commission, auction_date, data_quality_score,
+                  estimated_land_cost_per_dwelling, auction_minimum,
+                  auction_guarantee, auction_commission, auction_date, data_quality_score,
                   anomaly_flags_json, created_at, updated_at
                 )
                 VALUES (
-                  ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                  ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                  ?, ?, ?, ?, ?
+                  ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                  ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                  ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                  ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                  ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                 )
                 ON CONFLICT(internal_id) DO UPDATE SET
                   source = excluded.source,
@@ -151,6 +157,9 @@ class PropertyRepository:
                   latitude = excluded.latitude,
                   longitude = excluded.longitude,
                   location_precision = excluded.location_precision,
+                  location_source = excluded.location_source,
+                  location_method = excluded.location_method,
+                  geocoded_at = excluded.geocoded_at,
                   geocoding_source = excluded.geocoding_source,
                   geocoding_confidence = excluded.geocoding_confidence,
                   asking_price_clp = excluded.asking_price_clp,
@@ -247,7 +256,214 @@ class PropertyRepository:
                     (internal_id,),
                 ).fetchall()
             ]
+            payload["location_history"] = [
+                _decode_json_columns(dict(item), ("raw_result_json",))
+                for item in connection.execute(
+                    """
+                    SELECT * FROM property_location_history
+                    WHERE internal_id = ?
+                    ORDER BY created_at DESC, id DESC
+                    """,
+                    (internal_id,),
+                ).fetchall()
+            ]
+            payload["territorial_criteria"] = [
+                _decode_json_columns(dict(item), ("evidence_json",))
+                for item in connection.execute(
+                    """
+                    SELECT * FROM territorial_criteria
+                    WHERE internal_id = ?
+                    ORDER BY checked_at DESC, criterion_key
+                    """,
+                    (internal_id,),
+                ).fetchall()
+            ]
         return payload
+
+    def create_manual(self, payload: dict[str, Any]) -> str:
+        now = utc_now().isoformat()
+        internal_id = str(payload.get("internal_id") or uuid4())
+        title = str(payload.get("title") or "Terreno manual").strip()
+        lat = _safe_float(payload.get("latitude"))
+        lon = _safe_float(payload.get("longitude"))
+        location_precision = "EXACT" if lat is not None and lon is not None else "UNKNOWN"
+        location_method = "manual" if lat is not None and lon is not None else None
+        with self.database.transaction() as connection:
+            connection.execute(
+                """
+                INSERT INTO property_candidates (
+                  internal_id, source, source_type, external_id, canonical_url,
+                  publication_title, publication_date, last_seen, seller_type, broker,
+                  listing_status, region, province, commune, original_address,
+                  normalized_address, latitude, longitude, location_precision,
+                  location_source, location_method, geocoded_at, geocoding_source,
+                  geocoding_confidence, asking_price_clp, asking_price_uf,
+                  gross_area_m2, advertised_area_m2, data_quality_score,
+                  anomaly_flags_json, territorial_status, candidate_status,
+                  manual_notes, created_at, updated_at
+                )
+                VALUES (
+                  ?, 'manual', 'manual', ?, ?, ?, NULL, ?, 'unknown', NULL,
+                  'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                  '[]', 'SIN_INFORMACION_SUFICIENTE', 'ACTIVE', ?, ?, ?
+                )
+                """,
+                (
+                    internal_id,
+                    payload.get("external_id"),
+                    payload.get("url"),
+                    title,
+                    now,
+                    payload.get("region"),
+                    payload.get("province"),
+                    payload.get("commune"),
+                    payload.get("address"),
+                    payload.get("address"),
+                    lat,
+                    lon,
+                    location_precision,
+                    "manual",
+                    location_method,
+                    now if location_method else None,
+                    "manual" if location_method else None,
+                    0.98 if location_method else 0,
+                    _num(payload.get("asking_price_clp")),
+                    _num(payload.get("asking_price_uf")),
+                    _num(payload.get("gross_area_m2")),
+                    _num(payload.get("gross_area_m2")),
+                    65 if location_method else 45,
+                    payload.get("observations"),
+                    now,
+                    now,
+                ),
+            )
+        if lat is not None and lon is not None:
+            self.update_location(
+                internal_id,
+                latitude=lat,
+                longitude=lon,
+                location_source="manual",
+                location_method="manual",
+                location_precision=location_precision,
+                location_confidence=0.98,
+                address=payload.get("address"),
+                region=payload.get("region"),
+                commune=payload.get("commune"),
+                raw_result={"reason": "manual_property_creation"},
+                assigned_by="user",
+            )
+        return internal_id
+
+    def update_location(
+        self,
+        internal_id: str,
+        *,
+        latitude: float,
+        longitude: float,
+        location_source: str,
+        location_method: str,
+        location_precision: str,
+        location_confidence: float,
+        address: str | None = None,
+        region: str | None = None,
+        commune: str | None = None,
+        raw_result: dict[str, Any] | None = None,
+        assigned_by: str = "system",
+    ) -> dict[str, Any]:
+        if not (-90 <= latitude <= 90 and -180 <= longitude <= 180):
+            raise ValueError("Coordinates out of range")
+        now = utc_now().isoformat()
+        with self.database.transaction() as connection:
+            existing = connection.execute(
+                "SELECT internal_id FROM property_candidates WHERE internal_id = ?",
+                (internal_id,),
+            ).fetchone()
+            if existing is None:
+                raise KeyError(internal_id)
+            connection.execute(
+                """
+                UPDATE property_candidates
+                SET latitude = ?,
+                    longitude = ?,
+                    location_source = ?,
+                    location_method = ?,
+                    location_precision = ?,
+                    geocoding_source = ?,
+                    geocoding_confidence = ?,
+                    geocoded_at = ?,
+                    normalized_address = COALESCE(?, normalized_address),
+                    region = COALESCE(?, region),
+                    commune = COALESCE(?, commune),
+                    updated_at = ?
+                WHERE internal_id = ?
+                """,
+                (
+                    latitude,
+                    longitude,
+                    location_source,
+                    location_method,
+                    location_precision,
+                    location_source,
+                    location_confidence,
+                    now,
+                    address,
+                    region,
+                    commune,
+                    now,
+                    internal_id,
+                ),
+            )
+            connection.execute(
+                """
+                INSERT INTO property_location_history (
+                  internal_id, latitude, longitude, location_source,
+                  location_method, location_precision, location_confidence,
+                  address, region, commune, raw_result_json, assigned_by, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    internal_id,
+                    latitude,
+                    longitude,
+                    location_source,
+                    location_method,
+                    location_precision,
+                    location_confidence,
+                    address,
+                    region,
+                    commune,
+                    _json(raw_result or {}),
+                    assigned_by,
+                    now,
+                ),
+            )
+        updated = self.get(internal_id)
+        if updated is None:
+            raise KeyError(internal_id)
+        return updated
+
+    def update_territorial_status(
+        self,
+        internal_id: str,
+        *,
+        status: str,
+        summary: dict[str, Any],
+        checked_at: datetime | None = None,
+    ) -> None:
+        now = (checked_at or utc_now()).isoformat()
+        with self.database.transaction() as connection:
+            connection.execute(
+                """
+                UPDATE property_candidates
+                SET territorial_status = ?,
+                    territorial_checked_at = ?,
+                    territorial_summary_json = ?,
+                    updated_at = ?
+                WHERE internal_id = ?
+                """,
+                (status, now, _json(summary), now, internal_id),
+            )
 
     def count(self) -> int:
         with connect(self.database.database_path) as connection:
@@ -612,16 +828,14 @@ class SourceRecordAuditRepository:
             manual_reviewed = connection.execute(
                 f"""
                 SELECT COUNT(*) FROM source_records
-                {where}{' AND' if where else 'WHERE'} manual_review_status = 'REVIEWED'
+                {where}{" AND" if where else "WHERE"} manual_review_status = 'REVIEWED'
                 """,
                 params,
             ).fetchone()[0]
 
         counts = {str(row["automatic_classification"]): int(row["count"]) for row in rows}
         total = sum(counts.values())
-        accepted = sum(
-            counts.get(item, 0) for item in ("LAND_ACQUISITION", "LAND_SALE")
-        )
+        accepted = sum(counts.get(item, 0) for item in ("LAND_ACQUISITION", "LAND_SALE"))
         possible = sum(counts.get(item, 0) for item in ("REAL_ESTATE", "POSSIBLE_LAND", "UNKNOWN"))
         rejected = counts.get("FALSE_POSITIVE", 0)
         return {
@@ -721,9 +935,7 @@ class SourceRecordAuditRepository:
             classifications = _bucket_classifications(bucket)
             if classifications:
                 filters.append(
-                    "automatic_classification IN ("
-                    + ", ".join("?" for _ in classifications)
-                    + ")"
+                    "automatic_classification IN (" + ", ".join("?" for _ in classifications) + ")"
                 )
                 params.extend(classifications)
         if q:
@@ -1213,6 +1425,196 @@ class GeospatialCacheRepository:
             )
 
 
+class GeocodingCacheRepository:
+    def __init__(self, database: Database) -> None:
+        self.database = database
+
+    def get(self, cache_key: str) -> dict[str, Any] | None:
+        with connect(self.database.database_path) as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM geocoding_cache
+                WHERE cache_key = ? AND (expires_at IS NULL OR expires_at > ?)
+                """,
+                (cache_key, utc_now().isoformat()),
+            ).fetchone()
+            if row is None:
+                return None
+            connection.execute(
+                "UPDATE geocoding_cache SET last_used_at = ? WHERE cache_key = ?",
+                (utc_now().isoformat(), cache_key),
+            )
+        return _decode_json_columns(dict(row), ("request_json", "response_json"))
+
+    def set(
+        self,
+        *,
+        cache_key: str,
+        provider: str,
+        query_text: str,
+        normalized_query: str,
+        request: dict[str, Any],
+        response: dict[str, Any],
+        latitude: float | None,
+        longitude: float | None,
+        display_name: str | None,
+        location_precision: str,
+        location_method: str,
+        confidence: float,
+        source_url: str | None,
+        expires_at: datetime | None = None,
+    ) -> None:
+        now = utc_now().isoformat()
+        with self.database.transaction() as connection:
+            connection.execute(
+                """
+                INSERT INTO geocoding_cache (
+                  cache_key, provider, query_text, normalized_query, request_json,
+                  response_json, latitude, longitude, display_name,
+                  location_precision, location_method, confidence, source_url,
+                  created_at, last_used_at, expires_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(cache_key) DO UPDATE SET
+                  response_json = excluded.response_json,
+                  latitude = excluded.latitude,
+                  longitude = excluded.longitude,
+                  display_name = excluded.display_name,
+                  location_precision = excluded.location_precision,
+                  location_method = excluded.location_method,
+                  confidence = excluded.confidence,
+                  source_url = excluded.source_url,
+                  last_used_at = excluded.last_used_at,
+                  expires_at = excluded.expires_at
+                """,
+                (
+                    cache_key,
+                    provider,
+                    query_text,
+                    normalized_query,
+                    _json(request),
+                    _json(response),
+                    latitude,
+                    longitude,
+                    display_name,
+                    location_precision,
+                    location_method,
+                    confidence,
+                    source_url,
+                    now,
+                    now,
+                    expires_at.isoformat() if expires_at else None,
+                ),
+            )
+
+
+class MinvuLayerRepository:
+    def __init__(self, database: Database) -> None:
+        self.database = database
+
+    def upsert_many(self, rows: list[dict[str, Any]]) -> None:
+        with self.database.transaction() as connection:
+            for row in rows:
+                connection.execute(
+                    """
+                    INSERT INTO minvu_layers (
+                      provider, service_name, layer_name, layer_id, endpoint,
+                      geometry_type, spatial_reference, fields_json, status,
+                      last_checked, raw_metadata_json
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(provider, endpoint, layer_id) DO UPDATE SET
+                      service_name = excluded.service_name,
+                      layer_name = excluded.layer_name,
+                      geometry_type = excluded.geometry_type,
+                      spatial_reference = excluded.spatial_reference,
+                      fields_json = excluded.fields_json,
+                      status = excluded.status,
+                      last_checked = excluded.last_checked,
+                      raw_metadata_json = excluded.raw_metadata_json
+                    """,
+                    (
+                        row.get("provider") or "IDE MINVU",
+                        row.get("service_name") or "",
+                        row.get("layer_name") or "",
+                        int(row.get("layer_id") or 0),
+                        row.get("endpoint") or row.get("service_url") or "",
+                        row.get("geometry_type"),
+                        _json(row.get("spatial_reference") or {}),
+                        _json(row.get("fields") or []),
+                        row.get("status") or "UNKNOWN",
+                        row.get("last_checked") or utc_now().isoformat(),
+                        _json(row),
+                    ),
+                )
+
+    def list(self, *, limit: int = 500) -> list[dict[str, Any]]:
+        with connect(self.database.database_path) as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM minvu_layers
+                ORDER BY last_checked DESC, service_name, layer_id
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [
+            _decode_json_columns(
+                dict(row), ("spatial_reference", "fields_json", "raw_metadata_json")
+            )
+            for row in rows
+        ]
+
+
+class TerritorialCriteriaRepository:
+    def __init__(self, database: Database) -> None:
+        self.database = database
+
+    def replace_for_property(self, internal_id: str, rows: list[dict[str, Any]]) -> None:
+        with self.database.transaction() as connection:
+            connection.execute(
+                "DELETE FROM territorial_criteria WHERE internal_id = ?",
+                (internal_id,),
+            )
+            for row in rows:
+                connection.execute(
+                    """
+                    INSERT INTO territorial_criteria (
+                      internal_id, criterion_key, criterion_label, result, value,
+                      source, endpoint, layer_name, checked_at, evidence_json,
+                      confidence, observation
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        internal_id,
+                        row["criterion_key"],
+                        row["criterion_label"],
+                        row["result"],
+                        _json(row.get("value")),
+                        row.get("source"),
+                        row.get("endpoint"),
+                        row.get("layer_name"),
+                        row.get("checked_at") or utc_now().isoformat(),
+                        _json(row.get("evidence") or {}),
+                        float(row.get("confidence") or 0),
+                        row.get("observation"),
+                    ),
+                )
+
+    def list_for_property(self, internal_id: str) -> list[dict[str, Any]]:
+        with connect(self.database.database_path) as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM territorial_criteria
+                WHERE internal_id = ?
+                ORDER BY checked_at DESC, criterion_key
+                """,
+                (internal_id,),
+            ).fetchall()
+        return [_decode_json_columns(dict(row), ("evidence_json",)) for row in rows]
+
+
 class SourceRunStatusRepository:
     def __init__(self, database: Database) -> None:
         self.database = database
@@ -1378,6 +1780,8 @@ class ScrapingErrorRepository:
         message: str,
         exception: str | None = None,
     ) -> None:
+        safe_message = _sanitize_secret_text(message) or ""
+        safe_exception = _sanitize_secret_text(exception)
         with self.database.transaction() as connection:
             connection.execute(
                 """
@@ -1391,8 +1795,8 @@ class ScrapingErrorRepository:
                     source_id,
                     stage,
                     property_id,
-                    message,
-                    exception,
+                    safe_message,
+                    safe_exception,
                     utc_now().isoformat(),
                 ),
             )
@@ -1444,10 +1848,27 @@ def _sanitize_secret_text(value: Any) -> str | None:
         (r"(?i)(apikey=)[^&\s'\"}\]]+", r"\1REDACTED"),
         (r"(?i)(access_token=)[^&\s'\"}\]]+", r"\1REDACTED"),
         (r"(?i)(refresh_token=)[^&\s'\"}\]]+", r"\1REDACTED"),
+        (r"(?i)(password=)[^&\s'\"}\]]+", r"\1REDACTED"),
+        (r"(?i)(client_secret=)[^&\s'\"}\]]+", r"\1REDACTED"),
+        (r"(?i)(authorization:\s*bearer\s+)[^,\s'\"}\]]+", r"\1REDACTED"),
     ]
     for pattern, replacement in replacements:
         text = re.sub(pattern, replacement, text)
     return text
+
+
+def _safe_float(value: Any) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _decode_json_columns(row: dict[str, Any], columns: tuple[str, ...]) -> dict[str, Any]:
+    for column in columns:
+        public_key = column.removesuffix("_json")
+        row[public_key] = _decode_json(row.get(column), default={})
+    return row
 
 
 def _decode_source_record(row: dict[str, Any]) -> dict[str, Any]:

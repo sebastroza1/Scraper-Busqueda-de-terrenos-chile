@@ -4,6 +4,10 @@ import json
 from datetime import UTC, datetime
 from typing import Any
 
+from landfinder.classification.preliminary import (
+    evaluate_preliminary_territorial_status,
+    insufficient_location_assessment,
+)
 from landfinder.geospatial.geometry import calculate_parcel_metrics, point_geojson
 from landfinder.geospatial.ipt_catalog import MinvuIptCatalog
 from landfinder.geospatial.minvu import (
@@ -11,6 +15,7 @@ from landfinder.geospatial.minvu import (
     URBAN_LIMIT_LAYERS,
     ArcGisLayerConfig,
     MinvuArcGisConnector,
+    arcgis_geometry_to_geojson,
 )
 from landfinder.models.enums import (
     ConnectorStrategy,
@@ -26,6 +31,7 @@ from landfinder.storage.repositories import (
     EvidenceRepository,
     GeometryMetricsRepository,
     PropertyRepository,
+    TerritorialCriteriaRepository,
 )
 
 
@@ -44,6 +50,7 @@ class TerritorialAnalyzer:
         self.geometry_metrics = GeometryMetricsRepository(database)
         self.evidence = EvidenceRepository(database)
         self.provenance = DataProvenanceRepository(database)
+        self.criteria = TerritorialCriteriaRepository(database)
 
     async def refresh_property(
         self,
@@ -61,6 +68,7 @@ class TerritorialAnalyzer:
 
         evidence_records: list[EvidenceRecord] = []
         if geometry is None or geometry_kind == GeometryType.UNKNOWN:
+            assessment = insufficient_location_assessment(property_record)
             evidence_records.append(
                 _evidence(
                     internal_id,
@@ -73,7 +81,19 @@ class TerritorialAnalyzer:
             )
             self.evidence.add_many(internal_id, evidence_records)
             self.provenance.add_many(_provenance_from_evidence(evidence_records))
-            return self.summary(internal_id, extra={"warnings": ["NO_GEOMETRY_AVAILABLE"]})
+            self.criteria.replace_for_property(internal_id, assessment.criteria)
+            self.properties.update_territorial_status(
+                internal_id,
+                status=assessment.status,
+                summary=assessment.as_dict(),
+            )
+            return self.summary(
+                internal_id,
+                extra={
+                    "warnings": ["NO_GEOMETRY_AVAILABLE"],
+                    "preliminary_assessment": assessment.as_dict(),
+                },
+            )
 
         urban_limit = await self._analyze_urban_limit(
             internal_id,
@@ -98,6 +118,18 @@ class TerritorialAnalyzer:
         evidence_records.extend(prc.pop("evidence"))
         self.evidence.add_many(internal_id, evidence_records)
         self.provenance.add_many(_provenance_from_evidence(evidence_records))
+        assessment = evaluate_preliminary_territorial_status(
+            property_record=self.properties.get(internal_id) or property_record,
+            urban_limit=urban_limit,
+            risk=risk,
+            prc=prc,
+        )
+        self.criteria.replace_for_property(internal_id, assessment.criteria)
+        self.properties.update_territorial_status(
+            internal_id,
+            status=assessment.status,
+            summary=assessment.as_dict(),
+        )
 
         return self.summary(
             internal_id,
@@ -105,6 +137,7 @@ class TerritorialAnalyzer:
                 "urban_limit": urban_limit,
                 "risk_intersection": risk,
                 "prc": prc,
+                "preliminary_assessment": assessment.as_dict(),
             },
         )
 
@@ -118,6 +151,7 @@ class TerritorialAnalyzer:
             "geometry_metrics": self.geometry_metrics.get(internal_id),
             "evidence": self.evidence.list_for_property(internal_id),
             "data_provenance": self.provenance.list_for_property(internal_id),
+            "territorial_criteria": self.criteria.list_for_property(internal_id),
         }
         if extra:
             result.update(extra)
@@ -158,6 +192,7 @@ class TerritorialAnalyzer:
                     if isinstance(first, dict)
                     else {},
                     "matched_geometries": _feature_geometries(features),
+                    "matched_geojson": _feature_geojsons(features),
                     "evidence": [
                         _layer_evidence(
                             internal_id,
@@ -180,6 +215,8 @@ class TerritorialAnalyzer:
             "retrieved_at": _now_iso(),
             "inspected_layers": inspected_layers,
             "matched_attributes": {},
+            "matched_geometries": [],
+            "matched_geojson": [],
             "evidence": [
                 _layer_evidence(
                     internal_id,
@@ -251,6 +288,13 @@ class TerritorialAnalyzer:
             "analysis_precision": analysis_precision,
             "inspected_layers": inspected_layers,
             "matched_geometries": _feature_geometries(
+                [
+                    feature
+                    for layer_result in inspected_layers
+                    for feature in layer_result.get("features", [])
+                ]
+            ),
+            "matched_geojson": _feature_geojsons(
                 [
                     feature
                     for layer_result in inspected_layers
@@ -332,8 +376,7 @@ class TerritorialAnalyzer:
                     value=result["zone"],
                     confidence=confidence,
                     source_url=str(
-                        result.get("source_url")
-                        or "https://geoide.minvu.cl/server/rest/services"
+                        result.get("source_url") or "https://geoide.minvu.cl/server/rest/services"
                     ),
                     layer_name=result.get("applicable_layer"),
                     raw_metadata=result,
@@ -420,6 +463,17 @@ def _feature_geometries(features: list[Any]) -> list[dict[str, Any]]:
     for feature in features:
         if isinstance(feature, dict) and isinstance(feature.get("geometry"), dict):
             geometries.append(feature["geometry"])
+    return geometries
+
+
+def _feature_geojsons(features: list[Any]) -> list[dict[str, Any]]:
+    geometries = []
+    for feature in features:
+        if not isinstance(feature, dict) or not isinstance(feature.get("geometry"), dict):
+            continue
+        geojson = arcgis_geometry_to_geojson(feature["geometry"])
+        if geojson:
+            geometries.append(geojson)
     return geometries
 
 

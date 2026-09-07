@@ -16,7 +16,18 @@ abstract class LandfinderApi {
   Future<Map<String, dynamic>> communes(String regionCode);
   Future<Map<String, dynamic>> keywordPresets();
   Future<Map<String, dynamic>> settings();
+  Future<Map<String, dynamic>> mapProviders();
   Future<Map<String, dynamic>> updateSettings(Map<String, dynamic> values);
+  Future<Map<String, dynamic>> createManualProperty(
+    Map<String, dynamic> values,
+  );
+  Future<Map<String, dynamic>> geocode(Map<String, dynamic> values);
+  Future<Map<String, dynamic>> assignPropertyLocation(
+    String propertyId,
+    Map<String, dynamic> values,
+  );
+  Future<Map<String, dynamic>> resolvePropertyLocation(String propertyId);
+  Future<Map<String, dynamic>> propertyDiagnostics(String propertyId);
   Future<Map<String, dynamic>> startSearch(Map<String, dynamic> filters);
   Future<Map<String, dynamic>> search(String searchId);
   Future<Map<String, dynamic>> searchSourceRecords(
@@ -41,6 +52,7 @@ abstract class LandfinderApi {
     String? region,
     bool includeFeatureCounts = false,
   });
+  Future<Map<String, dynamic>> minvuLayers({bool refresh = false});
   Future<Map<String, dynamic>> exportExcel();
   Future<Map<String, bool>> secretStatus();
   Future<void> saveSecret(String key, String value);
@@ -174,6 +186,11 @@ class LocalLandfinderApi implements LandfinderApi {
   }
 
   @override
+  Future<Map<String, dynamic>> mapProviders() async {
+    return _map(await _request('GET', '/map/providers'));
+  }
+
+  @override
   Future<Map<String, dynamic>> updateSettings(
     Map<String, dynamic> values,
   ) async {
@@ -187,6 +204,42 @@ class LocalLandfinderApi implements LandfinderApi {
       }
     }
     return _map(await _request('PUT', '/settings', body: filtered));
+  }
+
+  @override
+  Future<Map<String, dynamic>> createManualProperty(
+    Map<String, dynamic> values,
+  ) async {
+    return _map(await _request('POST', '/properties', body: values));
+  }
+
+  @override
+  Future<Map<String, dynamic>> geocode(Map<String, dynamic> values) async {
+    return _map(await _request('POST', '/geocode', body: values));
+  }
+
+  @override
+  Future<Map<String, dynamic>> assignPropertyLocation(
+    String propertyId,
+    Map<String, dynamic> values,
+  ) async {
+    return _map(
+      await _request('PUT', '/properties/$propertyId/location', body: values),
+    );
+  }
+
+  @override
+  Future<Map<String, dynamic>> resolvePropertyLocation(
+    String propertyId,
+  ) async {
+    return _map(
+      await _request('POST', '/properties/$propertyId/location/resolve'),
+    );
+  }
+
+  @override
+  Future<Map<String, dynamic>> propertyDiagnostics(String propertyId) async {
+    return _map(await _request('GET', '/properties/$propertyId/diagnostics'));
   }
 
   @override
@@ -304,6 +357,17 @@ class LocalLandfinderApi implements LandfinderApi {
           if (region != null && region.trim().isNotEmpty) 'region': region,
           if (includeFeatureCounts) 'include_feature_counts': 'true',
         },
+      ),
+    );
+  }
+
+  @override
+  Future<Map<String, dynamic>> minvuLayers({bool refresh = false}) async {
+    return _map(
+      await _request(
+        'GET',
+        '/gis/minvu/layers',
+        query: {if (refresh) 'refresh': 'true'},
       ),
     );
   }

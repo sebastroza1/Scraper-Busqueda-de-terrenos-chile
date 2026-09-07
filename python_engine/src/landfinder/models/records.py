@@ -73,6 +73,9 @@ class NormalizedPropertyRecord(BaseModel):
     latitude: float | None = None
     longitude: float | None = None
     location_precision: str = "UNKNOWN"
+    location_source: str | None = None
+    location_method: str | None = None
+    geocoded_at: datetime | None = None
     geocoding_source: str | None = None
     geocoding_confidence: float = Field(default=0, ge=0, le=1)
     gross_area_m2: Decimal | None = None

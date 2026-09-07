@@ -2,6 +2,8 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:flutter_map/flutter_map.dart';
+import 'package:latlong2/latlong.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../../app/router.dart';
@@ -40,6 +42,18 @@ class _LandfinderHomeState extends State<LandfinderHome> {
       TextEditingController(
         text: 'http://127.0.0.1:8766/oauth/mercadolibre/callback',
       );
+  final TextEditingController _manualTitleController = TextEditingController();
+  final TextEditingController _manualRegionController = TextEditingController();
+  final TextEditingController _manualCommuneController =
+      TextEditingController();
+  final TextEditingController _manualAddressController =
+      TextEditingController();
+  final TextEditingController _manualLatController = TextEditingController();
+  final TextEditingController _manualLonController = TextEditingController();
+  final TextEditingController _manualAreaController = TextEditingController();
+  final TextEditingController _manualPriceController = TextEditingController();
+  final TextEditingController _manualUrlController = TextEditingController();
+  final TextEditingController _manualNotesController = TextEditingController();
 
   AppSection _section = AppSection.dashboard;
   List<Map<String, dynamic>> _sources = [];
@@ -57,6 +71,7 @@ class _LandfinderHomeState extends State<LandfinderHome> {
   Map<String, dynamic>? _audit;
   Map<String, dynamic>? _selectedProperty;
   Map<String, dynamic>? _selectedSourceRecord;
+  Map<String, dynamic> _mapProviders = {};
   Map<String, bool> _secretStatus = {};
   final Map<String, Map<String, dynamic>> _credentialDiagnostics = {};
   final Map<String, Map<String, dynamic>> _territoryByProperty = {};
@@ -79,6 +94,10 @@ class _LandfinderHomeState extends State<LandfinderHome> {
   bool _showUrbanLimitLayer = true;
   bool _showRiskLayer = true;
   bool _showZoningLayer = true;
+  bool _showPotentialStatus = true;
+  bool _showReviewStatus = true;
+  bool _showUnsuitableStatus = true;
+  bool _showInsufficientStatus = true;
   bool _exporting = false;
   String? _error;
   String? _exportPath;
@@ -103,6 +122,16 @@ class _LandfinderHomeState extends State<LandfinderHome> {
     _mercadoLibreClientIdController.dispose();
     _mercadoLibreClientSecretController.dispose();
     _mercadoLibreRedirectUriController.dispose();
+    _manualTitleController.dispose();
+    _manualRegionController.dispose();
+    _manualCommuneController.dispose();
+    _manualAddressController.dispose();
+    _manualLatController.dispose();
+    _manualLonController.dispose();
+    _manualAreaController.dispose();
+    _manualPriceController.dispose();
+    _manualUrlController.dispose();
+    _manualNotesController.dispose();
     widget.api.dispose();
     super.dispose();
   }
@@ -138,6 +167,7 @@ class _LandfinderHomeState extends State<LandfinderHome> {
       widget.api.settings(),
       widget.api.properties(),
       widget.api.secretStatus(),
+      widget.api.mapProviders(),
     ]);
     if (!mounted) {
       return;
@@ -175,6 +205,7 @@ class _LandfinderHomeState extends State<LandfinderHome> {
         propertiesPayload['items'] as List? ?? const [],
       );
       _secretStatus = Map<String, bool>.from(results[8] as Map);
+      _mapProviders = Map<String, dynamic>.from(results[9] as Map);
       if (_regionsCatalog.isEmpty ||
           !(_selectedRegionCode == 'ALL' ||
               _regionsCatalog.any(
@@ -523,6 +554,405 @@ class _LandfinderHomeState extends State<LandfinderHome> {
     }
   }
 
+  Future<void> _createManualProperty() async {
+    _manualTitleController.clear();
+    _manualRegionController.clear();
+    _manualCommuneController.clear();
+    _manualAddressController.clear();
+    _manualLatController.clear();
+    _manualLonController.clear();
+    _manualAreaController.clear();
+    _manualPriceController.clear();
+    _manualUrlController.clear();
+    _manualNotesController.clear();
+    final saved = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Agregar terreno'),
+        content: SizedBox(
+          width: 720,
+          child: SingleChildScrollView(
+            child: Wrap(
+              spacing: 12,
+              runSpacing: 12,
+              children: [
+                _InputBox(
+                  controller: _manualTitleController,
+                  label: 'Titulo',
+                  icon: Icons.title_outlined,
+                ),
+                _InputBox(
+                  controller: _manualRegionController,
+                  label: 'Region',
+                  icon: Icons.public_outlined,
+                ),
+                _InputBox(
+                  controller: _manualCommuneController,
+                  label: 'Comuna',
+                  icon: Icons.location_city_outlined,
+                ),
+                _InputBox(
+                  controller: _manualAddressController,
+                  label: 'Direccion',
+                  icon: Icons.signpost_outlined,
+                ),
+                _InputBox(
+                  controller: _manualLatController,
+                  label: 'Latitud',
+                  icon: Icons.my_location_outlined,
+                ),
+                _InputBox(
+                  controller: _manualLonController,
+                  label: 'Longitud',
+                  icon: Icons.explore_outlined,
+                ),
+                _InputBox(
+                  controller: _manualAreaController,
+                  label: 'Superficie m2',
+                  icon: Icons.square_foot_outlined,
+                ),
+                _InputBox(
+                  controller: _manualPriceController,
+                  label: 'Precio CLP',
+                  icon: Icons.payments_outlined,
+                ),
+                _InputBox(
+                  controller: _manualUrlController,
+                  label: 'URL',
+                  icon: Icons.link_outlined,
+                ),
+                _InputBox(
+                  controller: _manualNotesController,
+                  label: 'Observaciones',
+                  icon: Icons.notes_outlined,
+                ),
+              ],
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('Cancelar'),
+          ),
+          FilledButton.icon(
+            onPressed: () => Navigator.of(context).pop(true),
+            icon: const Icon(Icons.add_location_alt_outlined),
+            label: const Text('Guardar'),
+          ),
+        ],
+      ),
+    );
+    if (saved != true || _manualTitleController.text.trim().isEmpty) {
+      return;
+    }
+    setState(() => _error = null);
+    try {
+      final response = await widget.api.createManualProperty(
+        {
+          'title': _manualTitleController.text.trim(),
+          'region': _manualRegionController.text.trim(),
+          'commune': _manualCommuneController.text.trim(),
+          'address': _manualAddressController.text.trim(),
+          'latitude': _parseDouble(_manualLatController.text),
+          'longitude': _parseDouble(_manualLonController.text),
+          'gross_area_m2': _parseDouble(_manualAreaController.text),
+          'asking_price_clp': _parseInt(_manualPriceController.text),
+          'url': _manualUrlController.text.trim(),
+          'observations': _manualNotesController.text.trim(),
+        }..removeWhere((_, value) => value == null || value == ''),
+      );
+      final property = Map<String, dynamic>.from(response['property'] as Map);
+      await _refreshAll();
+      if (mounted) {
+        setState(() {
+          _selectedProperty = property;
+          _section = AppSection.map;
+        });
+      }
+    } catch (error) {
+      if (mounted) {
+        setState(() => _error = error.toString());
+      }
+    }
+  }
+
+  Future<void> _showAssignLocationDialog(Map<String, dynamic> property) async {
+    final addressController = TextEditingController(
+      text: _knownText(
+        property['normalized_address'] ?? property['original_address'],
+      ).replaceAll('Sin informacion', ''),
+    );
+    final regionController = TextEditingController(
+      text: _knownText(property['region']).replaceAll('Sin informacion', ''),
+    );
+    final communeController = TextEditingController(
+      text: _knownText(property['commune']).replaceAll('Sin informacion', ''),
+    );
+    final latController = TextEditingController(
+      text: property['latitude']?.toString() ?? '',
+    );
+    final lonController = TextEditingController(
+      text: property['longitude']?.toString() ?? '',
+    );
+    var geocodeResults = <Map<String, dynamic>>[];
+    var searching = false;
+    try {
+      final assigned = await showDialog<bool>(
+        context: context,
+        builder: (context) => StatefulBuilder(
+          builder: (context, setDialogState) {
+            final lat = _parseDouble(latController.text);
+            final lon = _parseDouble(lonController.text);
+            final point = lat == null || lon == null
+                ? const LatLng(-33.4489, -70.6693)
+                : LatLng(lat, lon);
+            return AlertDialog(
+              title: const Text('Asignar ubicacion'),
+              content: SizedBox(
+                width: 760,
+                child: SingleChildScrollView(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Wrap(
+                        spacing: 12,
+                        runSpacing: 12,
+                        children: [
+                          _InputBox(
+                            controller: addressController,
+                            label: 'Direccion',
+                            icon: Icons.signpost_outlined,
+                          ),
+                          _InputBox(
+                            controller: communeController,
+                            label: 'Comuna',
+                            icon: Icons.location_city_outlined,
+                          ),
+                          _InputBox(
+                            controller: regionController,
+                            label: 'Region',
+                            icon: Icons.public_outlined,
+                          ),
+                          _InputBox(
+                            controller: latController,
+                            label: 'Latitud',
+                            icon: Icons.my_location_outlined,
+                          ),
+                          _InputBox(
+                            controller: lonController,
+                            label: 'Longitud',
+                            icon: Icons.explore_outlined,
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 12),
+                      Wrap(
+                        spacing: 8,
+                        runSpacing: 8,
+                        children: [
+                          OutlinedButton.icon(
+                            onPressed: searching
+                                ? null
+                                : () async {
+                                    setDialogState(() => searching = true);
+                                    try {
+                                      final result = await widget.api.geocode({
+                                        'address': addressController.text,
+                                        'commune': communeController.text,
+                                        'region': regionController.text,
+                                      });
+                                      geocodeResults =
+                                          List<Map<String, dynamic>>.from(
+                                            (result['candidates'] as List? ??
+                                                    const [])
+                                                .whereType<Map>()
+                                                .map(
+                                                  (item) =>
+                                                      Map<String, dynamic>.from(
+                                                        item,
+                                                      ),
+                                                ),
+                                          );
+                                      if (geocodeResults.isNotEmpty) {
+                                        latController.text = geocodeResults
+                                            .first['latitude']
+                                            .toString();
+                                        lonController.text = geocodeResults
+                                            .first['longitude']
+                                            .toString();
+                                      }
+                                    } finally {
+                                      setDialogState(() => searching = false);
+                                    }
+                                  },
+                            icon: searching
+                                ? const SizedBox.square(
+                                    dimension: 18,
+                                    child: CircularProgressIndicator(
+                                      strokeWidth: 2,
+                                    ),
+                                  )
+                                : const Icon(Icons.search_outlined),
+                            label: const Text('Buscar direccion'),
+                          ),
+                        ],
+                      ),
+                      if (geocodeResults.isNotEmpty) ...[
+                        const SizedBox(height: 10),
+                        for (final result in geocodeResults.take(3))
+                          ListTile(
+                            dense: true,
+                            leading: const Icon(Icons.place_outlined),
+                            title: Text(_knownText(result['display_name'])),
+                            subtitle: Text(
+                              '${result['latitude']}, ${result['longitude']} | ${_knownText(result['location_precision'])}',
+                            ),
+                            onTap: () {
+                              setDialogState(() {
+                                latController.text = result['latitude']
+                                    .toString();
+                                lonController.text = result['longitude']
+                                    .toString();
+                                addressController.text = _knownText(
+                                  result['display_name'],
+                                );
+                              });
+                            },
+                          ),
+                      ],
+                      const SizedBox(height: 12),
+                      SizedBox(
+                        height: 300,
+                        child: ClipRRect(
+                          borderRadius: BorderRadius.circular(8),
+                          child: FlutterMap(
+                            options: MapOptions(
+                              initialCenter: point,
+                              initialZoom: 13,
+                              onTap: (_, tapped) {
+                                setDialogState(() {
+                                  latController.text = tapped.latitude
+                                      .toStringAsFixed(6);
+                                  lonController.text = tapped.longitude
+                                      .toStringAsFixed(6);
+                                });
+                              },
+                            ),
+                            children: [
+                              TileLayer(
+                                urlTemplate: _mapTileUrlTemplate(),
+                                userAgentPackageName: 'cl.landfinder.desktop',
+                              ),
+                              MarkerLayer(
+                                markers: [
+                                  Marker(
+                                    point: point,
+                                    width: 44,
+                                    height: 44,
+                                    child: const Icon(
+                                      Icons.location_on,
+                                      color: Color(0xFF7C3AED),
+                                      size: 36,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(context).pop(false),
+                  child: const Text('Cancelar'),
+                ),
+                FilledButton.icon(
+                  onPressed: lat == null || lon == null
+                      ? null
+                      : () => Navigator.of(context).pop(true),
+                  icon: const Icon(Icons.check_circle_outline),
+                  label: const Text('Confirmar ubicacion'),
+                ),
+              ],
+            );
+          },
+        ),
+      );
+      if (assigned != true) {
+        return;
+      }
+      await widget.api.assignPropertyLocation(
+        property['internal_id'].toString(),
+        {
+          'latitude': _parseDouble(latController.text),
+          'longitude': _parseDouble(lonController.text),
+          'address': addressController.text.trim(),
+          'region': regionController.text.trim(),
+          'commune': communeController.text.trim(),
+          'location_precision': 'EXACT',
+        }..removeWhere((_, value) => value == null || value == ''),
+      );
+      await _refreshAll();
+      final propertyId = property['internal_id']?.toString();
+      if (propertyId != null) {
+        await _loadTerritory(propertyId);
+      }
+      if (mounted) {
+        setState(() => _section = AppSection.map);
+      }
+    } finally {
+      addressController.dispose();
+      regionController.dispose();
+      communeController.dispose();
+      latController.dispose();
+      lonController.dispose();
+    }
+  }
+
+  Future<void> _showDiagnostics(Map<String, dynamic> property) async {
+    final propertyId = property['internal_id']?.toString();
+    if (propertyId == null) {
+      return;
+    }
+    try {
+      final diagnostics = await widget.api.propertyDiagnostics(propertyId);
+      if (!mounted) {
+        return;
+      }
+      await showDialog<void>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('Diagnostico'),
+          content: SizedBox(
+            width: 820,
+            height: 620,
+            child: SingleChildScrollView(
+              child: SelectableText(
+                const JsonEncoder.withIndent('  ').convert(diagnostics),
+                style: Theme.of(context).textTheme.bodySmall,
+              ),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text('Cerrar'),
+            ),
+          ],
+        ),
+      );
+    } catch (error) {
+      if (mounted) {
+        setState(() => _error = error.toString());
+      }
+    }
+  }
+
   Future<void> _loadAudit(String sourceId) async {
     setState(() {
       _audit = null;
@@ -699,6 +1129,13 @@ class _LandfinderHomeState extends State<LandfinderHome> {
             title: _section.label,
             subtitle: _subtitleForSection(),
             onRefresh: _refreshAll,
+            actions: [
+              FilledButton.icon(
+                onPressed: _createManualProperty,
+                icon: const Icon(Icons.add_location_alt_outlined),
+                label: const Text('Agregar terreno'),
+              ),
+            ],
           ),
           if (_error != null) ...[
             const SizedBox(height: 12),
@@ -1881,10 +2318,26 @@ class _LandfinderHomeState extends State<LandfinderHome> {
             ),
             Align(
               alignment: Alignment.centerLeft,
-              child: OutlinedButton.icon(
-                onPressed: () => _showFullPropertyDetail(property),
-                icon: const Icon(Icons.open_in_full_outlined),
-                label: const Text('Ver detalle completo'),
+              child: Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  OutlinedButton.icon(
+                    onPressed: () => _showFullPropertyDetail(property),
+                    icon: const Icon(Icons.open_in_full_outlined),
+                    label: const Text('Ver detalle completo'),
+                  ),
+                  OutlinedButton.icon(
+                    onPressed: () => _showAssignLocationDialog(property),
+                    icon: const Icon(Icons.add_location_alt_outlined),
+                    label: const Text('Asignar ubicacion'),
+                  ),
+                  OutlinedButton.icon(
+                    onPressed: () => _showDiagnostics(property),
+                    icon: const Icon(Icons.rule_folder_outlined),
+                    label: const Text('Diagnostico'),
+                  ),
+                ],
               ),
             ),
             const Divider(height: 24),
@@ -2319,32 +2772,141 @@ class _LandfinderHomeState extends State<LandfinderHome> {
   }
 
   Widget _buildMap() {
+    final visibleProperties = _mapVisibleProperties();
     Map<String, dynamic>? selected = _selectedProperty;
+    if (selected != null &&
+        !visibleProperties.any(
+          (property) =>
+              property['internal_id']?.toString() ==
+              selected?['internal_id']?.toString(),
+        )) {
+      selected = null;
+    }
     if (selected == null) {
-      for (final property in _properties) {
+      for (final property in visibleProperties) {
         if (_hasValidPropertyLocation(property)) {
           selected = property;
           break;
         }
       }
     }
-    return LandfinderMapScreen(
-      properties: _properties,
-      selectedProperty: selected,
-      territoryByProperty: _territoryByProperty,
-      showLandLayer: _showLandLayer,
-      showUrbanLimitLayer: _showUrbanLimitLayer,
-      showRiskLayer: _showRiskLayer,
-      showZoningLayer: _showZoningLayer,
-      refreshingTerritory: _refreshingTerritory,
-      onLandLayerChanged: (value) => setState(() => _showLandLayer = value),
-      onUrbanLimitLayerChanged: (value) =>
-          setState(() => _showUrbanLimitLayer = value),
-      onRiskLayerChanged: (value) => setState(() => _showRiskLayer = value),
-      onZoningLayerChanged: (value) => setState(() => _showZoningLayer = value),
-      onSelectProperty: _selectProperty,
-      onRefreshTerritory: () => _refreshSelectedTerritory(forceRefresh: false),
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: [
+            FilterChip(
+              selected: _showPotentialStatus,
+              label: const Text('Potencialmente aptos'),
+              onSelected: (value) =>
+                  setState(() => _showPotentialStatus = value),
+            ),
+            FilterChip(
+              selected: _showReviewStatus,
+              label: const Text('Requieren revision'),
+              onSelected: (value) => setState(() => _showReviewStatus = value),
+            ),
+            FilterChip(
+              selected: _showUnsuitableStatus,
+              label: const Text('Potencialmente no aptos'),
+              onSelected: (value) =>
+                  setState(() => _showUnsuitableStatus = value),
+            ),
+            FilterChip(
+              selected: _showInsufficientStatus,
+              label: const Text('Sin informacion'),
+              onSelected: (value) =>
+                  setState(() => _showInsufficientStatus = value),
+            ),
+          ],
+        ),
+        const SizedBox(height: 12),
+        Expanded(
+          child: LandfinderMapScreen(
+            properties: visibleProperties,
+            selectedProperty: selected,
+            territoryByProperty: _territoryByProperty,
+            showLandLayer: _showLandLayer,
+            showUrbanLimitLayer: _showUrbanLimitLayer,
+            showRiskLayer: _showRiskLayer,
+            showZoningLayer: _showZoningLayer,
+            refreshingTerritory: _refreshingTerritory,
+            tileUrlTemplate: _mapTileUrlTemplate(),
+            tileAttributionUrl: _mapAttributionUrl(),
+            onLandLayerChanged: (value) =>
+                setState(() => _showLandLayer = value),
+            onUrbanLimitLayerChanged: (value) =>
+                setState(() => _showUrbanLimitLayer = value),
+            onRiskLayerChanged: (value) =>
+                setState(() => _showRiskLayer = value),
+            onZoningLayerChanged: (value) =>
+                setState(() => _showZoningLayer = value),
+            onSelectProperty: _selectProperty,
+            onRefreshTerritory: () =>
+                _refreshSelectedTerritory(forceRefresh: false),
+            onViewTerritory: (property) {
+              _selectProperty(property);
+              setState(() => _section = AppSection.results);
+            },
+          ),
+        ),
+      ],
     );
+  }
+
+  List<Map<String, dynamic>> _mapVisibleProperties() {
+    return [
+      for (final property in _properties)
+        if (_isVisibleMapStatus(property)) property,
+    ];
+  }
+
+  bool _isVisibleMapStatus(Map<String, dynamic> property) {
+    final status = property['territorial_status']?.toString().toUpperCase();
+    if (status == 'POTENCIALMENTE_APTO') {
+      return _showPotentialStatus;
+    }
+    if (status == 'REQUIERE_REVISION') {
+      return _showReviewStatus;
+    }
+    if (status == 'POTENCIALMENTE_NO_APTO') {
+      return _showUnsuitableStatus;
+    }
+    return _showInsufficientStatus;
+  }
+
+  String _mapTileUrlTemplate() {
+    final provider = _selectedMapProvider();
+    return provider?['tile_url_template']?.toString() ??
+        'https://tile.openstreetmap.org/{z}/{x}/{y}.png';
+  }
+
+  String _mapAttributionUrl() {
+    final provider = _selectedMapProvider();
+    return provider?['attribution_url']?.toString() ??
+        'https://www.openstreetmap.org/copyright';
+  }
+
+  Map<String, dynamic>? _selectedMapProvider() {
+    final selected = _mapProviders['selected']?.toString();
+    final items = _mapProviders['items'];
+    if (items is! List) {
+      return null;
+    }
+    for (final item in items.whereType<Map>()) {
+      if (item['provider_id']?.toString() == selected &&
+          item['tile_url_template'] != null) {
+        return Map<String, dynamic>.from(item);
+      }
+    }
+    for (final item in items.whereType<Map>()) {
+      if (item['provider_id']?.toString() == 'osm') {
+        return Map<String, dynamic>.from(item);
+      }
+    }
+    return null;
   }
 
   Widget _buildSources() {

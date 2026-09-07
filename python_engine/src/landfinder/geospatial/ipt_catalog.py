@@ -10,6 +10,7 @@ from landfinder.geospatial.minvu import (
     MINVU_ARCGIS_ROOT,
     ArcGisLayerConfig,
     MinvuArcGisConnector,
+    arcgis_geometry_to_geojson,
 )
 from landfinder.storage.repositories import GeospatialCacheRepository, utc_now
 
@@ -323,12 +324,11 @@ class MinvuIptCatalog:
                         "zone_field": zone_field,
                         "source": "IDE MINVU ArcGIS REST",
                         "source_url": candidate["service_url"],
-                        "candidate_layers": [
-                            _candidate_summary(item) for item in candidates[:20]
-                        ],
+                        "candidate_layers": [_candidate_summary(item) for item in candidates[:20]],
                         "queried_layers": queried_layers,
                         "matched_attributes": attributes,
                         "matched_geometries": _feature_geometries(features),
+                        "matched_geojson": _feature_geojsons(features),
                     }
 
         return {
@@ -505,6 +505,17 @@ def _feature_geometries(features: list[Any]) -> list[dict[str, Any]]:
     for feature in features:
         if isinstance(feature, dict) and isinstance(feature.get("geometry"), dict):
             geometries.append(feature["geometry"])
+    return geometries
+
+
+def _feature_geojsons(features: list[Any]) -> list[dict[str, Any]]:
+    geometries = []
+    for feature in features:
+        if not isinstance(feature, dict) or not isinstance(feature.get("geometry"), dict):
+            continue
+        geojson = arcgis_geometry_to_geojson(feature["geometry"])
+        if geojson:
+            geometries.append(geojson)
     return geometries
 
 
