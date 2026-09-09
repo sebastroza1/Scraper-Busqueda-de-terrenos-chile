@@ -1,0 +1,38 @@
+{
+  "product": "Landfinder Chile",
+  "positioning": "Inteligencia territorial para encontrar, analizar y comparar terrenos.",
+  "plans": {
+    "Free": {
+      "price_clp": 0,
+      "features": [
+        "Explorar mapa",
+        "Capas básicas",
+        "Metro actual y futuro",
+        "Hasta 3 áreas guardadas",
+        "Comparación básica"
+      ]
+    },
+    "Pro": {
+      "price_clp": null,
+      "features": [
+        "Áreas ampliadas",
+        "Comparaciones avanzadas",
+        "Alertas territoriales",
+        "Reportes y exportaciones",
+        "Historial de cambios",
+        "Capas futuras premium"
+      ]
+    },
+    "Empresa": {
+      "price_clp": null,
+      "features": [
+        "Workspaces",
+        "Equipos y permisos",
+        "Proyectos",
+        "Reportes corporativos",
+        "Integraciones / API",
+        "Administración"
+      ]
+    }
+  }
+}

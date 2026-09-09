@@ -1,1 +1,0 @@
-"""Geospatial source connectors."""
