@@ -1,5 +1,6 @@
+from landfinder.connectors.auctions.bienes_nacionales import BienesNacionalesProvider
 from landfinder.connectors.base import SearchSource, SourceConnector
-from landfinder.connectors.marketplaces.mercadolibre import MercadoLibreRealEstateConnector
+from landfinder.connectors.public_procurement.chilecompra_ocds import ChileCompraOCDSProvider
 from landfinder.connectors.public_procurement.mercado_publico import MercadoPublicoConnector
 from landfinder.models.enums import SourceRole
 
@@ -10,8 +11,9 @@ def default_connectors() -> list[SourceConnector]:
 
 def default_search_sources() -> list[SearchSource]:
     return [
+        BienesNacionalesProvider(),
+        ChileCompraOCDSProvider(),
         MercadoPublicoConnector(),
-        MercadoLibreRealEstateConnector(),
     ]
 
 

@@ -41,7 +41,11 @@ class GeocodingRequest:
         if self.address:
             return 2
         if self.commune and self.region:
-            return 4
+            return 6
+        if self.commune:
+            return 6
+        if self.region:
+            return 7
         return 5
 
 
@@ -95,7 +99,7 @@ class SourceCoordinatesProvider(GeocodingProvider):
                 longitude=request.longitude,
                 display_name=request.search_text or "Coordenadas de fuente",
                 location_method="source_coordinates",
-                location_precision="APPROXIMATE_PROPERTY",
+                location_precision="EXACT_COORDINATES",
                 confidence=0.7,
                 raw_result={"level": request.level},
             )
@@ -157,6 +161,8 @@ class NominatimProvider(GeocodingProvider):
     async def geocode(self, request: GeocodingRequest) -> list[GeocodingResult]:
         query_text = request.search_text
         if not query_text:
+            return []
+        if _is_too_generic_for_property_geocoding(request):
             return []
         normalized = normalize_query(query_text)
         cache_key = cache_key_for(self.provider_id, normalized)
@@ -225,7 +231,7 @@ class NominatimProvider(GeocodingProvider):
 
 
 def cache_key_for(provider: str, normalized_query: str) -> str:
-    return hashlib.sha256(f"{provider}:{normalized_query}".encode("utf-8")).hexdigest()
+    return hashlib.sha256(f"{provider}:{normalized_query}".encode()).hexdigest()
 
 
 def normalize_query(value: str) -> str:
@@ -279,21 +285,45 @@ def _precision_from_request_and_result(request: GeocodingRequest, item: dict[str
     if request.level <= 3 and any(
         token in osm_type for token in ("house", "building", "residential")
     ):
-        return "APPROXIMATE_PROPERTY"
+        return "VERIFIED_ADDRESS"
     if request.level <= 3:
-        return "APPROXIMATE"
-    if request.level == 4:
-        return "PROPERTY_COMMUNE_CENTROID"
-    return "APPROXIMATE"
+        return "STREET_ADDRESS"
+    if request.level == 6:
+        return "COMMUNE_ONLY"
+    if request.level == 7:
+        return "REGION_ONLY"
+    return "COUNTRY_ONLY"
 
 
 def _confidence_for_precision(precision: str, item: dict[str, Any]) -> float:
     importance = _safe_float(item.get("importance")) or 0
-    if precision == "APPROXIMATE_PROPERTY":
+    if precision in {"VERIFIED_ADDRESS", "EXACT_COORDINATES"}:
         return min(0.85, 0.62 + importance / 3)
-    if precision == "PROPERTY_COMMUNE_CENTROID":
+    if precision in {"STREET_ADDRESS", "SECTOR"}:
+        return min(0.72, 0.55 + importance / 4)
+    if precision in {"COMMUNE_ONLY", "REGION_ONLY", "COUNTRY_ONLY"}:
         return min(0.62, 0.45 + importance / 4)
     return min(0.7, 0.5 + importance / 4)
+
+
+def _is_too_generic_for_property_geocoding(request: GeocodingRequest) -> bool:
+    normalized = normalize_query(request.search_text)
+    generic = {
+        "",
+        "chile",
+        "region de chile",
+        "region chile",
+    }
+    if normalized in generic:
+        return True
+    if request.level >= 5:
+        return True
+    address = normalize_query(request.address or "")
+    if address in generic:
+        return True
+    if not address:
+        return True
+    return False
 
 
 def _compact_json(value: dict[str, Any]) -> dict[str, Any]:

@@ -6,6 +6,8 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from landfinder.core.windows_secrets import read_windows_secret
+
 
 class Settings(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -17,6 +19,11 @@ class Settings(BaseModel):
     session_token: str
     cmf_api_key: str | None = None
     mercado_publico_ticket: str | None = None
+    mercadolibre_client_id: str | None = None
+    mercadolibre_client_secret: str | None = None
+    mercadolibre_redirect_uri: str | None = None
+    mercadolibre_partner_seller_ids: str | None = None
+    mercadolibre_marketplace_global_enabled: bool = False
     mercadolibre_access_token: str | None = None
     mercadolibre_refresh_token: str | None = None
     mercadolibre_access_token_expires_at: str | None = None
@@ -47,11 +54,28 @@ def load_settings(
         or os.getenv("LAND_FINDER_SESSION_TOKEN")
         or secrets.token_urlsafe(32),
         cmf_api_key=os.getenv("CMF_API_KEY") or os.getenv("UF_CMF_API_KEY"),
-        mercado_publico_ticket=os.getenv("MERCADO_PUBLICO_TICKET"),
-        mercadolibre_access_token=os.getenv("MERCADOLIBRE_ACCESS_TOKEN"),
-        mercadolibre_refresh_token=os.getenv("MERCADOLIBRE_REFRESH_TOKEN"),
-        mercadolibre_access_token_expires_at=os.getenv("MERCADOLIBRE_ACCESS_TOKEN_EXPIRES_AT"),
+        mercado_publico_ticket=_secret("MERCADO_PUBLICO_TICKET"),
+        mercadolibre_client_id=_secret("MERCADOLIBRE_CLIENT_ID"),
+        mercadolibre_client_secret=_secret("MERCADOLIBRE_CLIENT_SECRET"),
+        mercadolibre_redirect_uri=_secret("MERCADOLIBRE_REDIRECT_URI"),
+        mercadolibre_partner_seller_ids=_secret("MERCADOLIBRE_PARTNER_SELLER_IDS"),
+        mercadolibre_marketplace_global_enabled=_truthy(
+            os.getenv("MERCADOLIBRE_MARKETPLACE_GLOBAL_ENABLED")
+        ),
+        mercadolibre_access_token=_secret("MERCADOLIBRE_ACCESS_TOKEN"),
+        mercadolibre_refresh_token=_secret("MERCADOLIBRE_REFRESH_TOKEN"),
+        mercadolibre_access_token_expires_at=_secret(
+            "MERCADOLIBRE_ACCESS_TOKEN_EXPIRES_AT"
+        ),
         reference_property_id=os.getenv("LAND_FINDER_REFERENCE_PROPERTY_ID")
         or os.getenv("LANDFINDER_REFERENCE_PROPERTY_ID"),
         map_provider=os.getenv("MAP_PROVIDER", "osm").strip().lower() or "osm",
     )
+
+
+def _secret(key: str) -> str | None:
+    return os.getenv(key) or read_windows_secret(key)
+
+
+def _truthy(value: str | None) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}

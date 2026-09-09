@@ -8,6 +8,7 @@ from landfinder.classification.preliminary import (
     evaluate_preliminary_territorial_status,
     insufficient_location_assessment,
 )
+from landfinder.geospatial.admin_validator import AdministrativeLocationValidator
 from landfinder.geospatial.geometry import calculate_parcel_metrics, point_geojson
 from landfinder.geospatial.ipt_catalog import MinvuIptCatalog
 from landfinder.geospatial.minvu import (
@@ -30,6 +31,7 @@ from landfinder.storage.repositories import (
     DataProvenanceRepository,
     EvidenceRepository,
     GeometryMetricsRepository,
+    GeospatialCacheRepository,
     PropertyRepository,
     TerritorialCriteriaRepository,
 )
@@ -51,6 +53,9 @@ class TerritorialAnalyzer:
         self.evidence = EvidenceRepository(database)
         self.provenance = DataProvenanceRepository(database)
         self.criteria = TerritorialCriteriaRepository(database)
+        self.admin_validator = AdministrativeLocationValidator(
+            cache=GeospatialCacheRepository(database)
+        )
 
     async def refresh_property(
         self,
@@ -92,6 +97,31 @@ class TerritorialAnalyzer:
                 extra={
                     "warnings": ["NO_GEOMETRY_AVAILABLE"],
                     "preliminary_assessment": assessment.as_dict(),
+                },
+            )
+
+        admin_validation = await self.admin_validator.validate_property(
+            property_record,
+            force_refresh=force_refresh,
+        )
+        self.properties.update_admin_validation(internal_id, admin_validation.as_dict())
+        if admin_validation.blocks_territorial_analysis:
+            summary = {
+                "status": "BLOCKED_LOCATION_CONFLICT",
+                "reason": admin_validation.admin_validation_reason,
+                "admin_validation": admin_validation.as_dict(),
+            }
+            self.properties.update_territorial_status(
+                internal_id,
+                status="BLOCKED_LOCATION_CONFLICT",
+                summary=summary,
+            )
+            return self.summary(
+                internal_id,
+                extra={
+                    "warnings": ["ADMIN_LOCATION_CONFLICT"],
+                    "admin_validation": admin_validation.as_dict(),
+                    "preliminary_assessment": summary,
                 },
             )
 
@@ -155,6 +185,26 @@ class TerritorialAnalyzer:
         }
         if extra:
             result.update(extra)
+        if "admin_validation" not in result:
+            result["admin_validation"] = {
+                "source_region": property_record.get("source_region")
+                or property_record.get("region"),
+                "source_commune": property_record.get("source_commune")
+                or property_record.get("commune"),
+                "calculated_region": property_record.get("calculated_region"),
+                "calculated_commune": property_record.get("calculated_commune"),
+                "admin_validation_status": property_record.get(
+                    "admin_validation_status"
+                ),
+                "admin_validation_confidence": property_record.get(
+                    "admin_validation_confidence"
+                ),
+                "admin_validation_reason": property_record.get(
+                    "admin_validation_reason"
+                ),
+                "source_epsg": property_record.get("source_epsg"),
+                "normalized_epsg": property_record.get("normalized_epsg"),
+            }
         return result
 
     async def _analyze_urban_limit(

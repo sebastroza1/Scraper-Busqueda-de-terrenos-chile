@@ -48,6 +48,8 @@ class LandOpportunityClassifier:
         "expropiacion",
         "expropiar",
     ]
+    lease_terms = ["arriendo", "arrendar", "arrendamiento"]
+    concession_terms = ["concesion", "concesionar", "concesion onerosa"]
     sale_terms = ["enajenacion", "venta", "vender", "remate", "subasta"]
     real_estate_terms = [
         "terreno",
@@ -236,6 +238,42 @@ class LandOpportunityClassifier:
         "servicios de asistencia forestal",
         "administracion de cultivos forestales",
     ]
+    goods_for_property_terms = [
+        "contenedor",
+        "contenedores",
+        "articulos electricos",
+        "materiales electricos",
+        "cubre suelo",
+        "cubre suelos",
+        "sistema de riego",
+        "canal de riego",
+        "insumos",
+        "maquinaria",
+        "seguros",
+        "polizas",
+    ]
+    works_on_existing_property_terms = [
+        "rehabilitacion de espacio publico",
+        "recuperacion de espacio",
+        "mejoramiento de infraestructura",
+        "mantencion de inmuebles",
+        "mantenimiento de inmuebles",
+        "construccion de obras civiles",
+        "habilitacion de terreno",
+        "limpieza de terreno",
+        "desmalezado",
+    ]
+    valuation_or_study_terms = [
+        "tasacion",
+        "tasacion de bienes inmuebles",
+        "estudio de suelo",
+        "estudio mecanica de suelo",
+        "estudio mecanica de suelos",
+        "mecanica de suelo",
+        "mecanica de suelos",
+        "levantamiento topografico",
+        "topografia",
+    ]
     context_terms = [
         "venta de terrenos comerciales o industriales",
         "venta de propiedades o edificios",
@@ -266,9 +304,19 @@ class LandOpportunityClassifier:
                 *self.housing_terms,
                 *self.organization_terms,
                 *self.context_terms,
+                *self.lease_terms,
+                *self.concession_terms,
             ],
         )
-        negative_terms = _matched_terms(full_text, self.negative_service_terms)
+        negative_terms = _matched_terms(
+            full_text,
+            [
+                *self.negative_service_terms,
+                *self.goods_for_property_terms,
+                *self.works_on_existing_property_terms,
+                *self.valuation_or_study_terms,
+            ],
+        )
         rules: list[str] = []
         score = 0
 
@@ -298,6 +346,42 @@ class LandOpportunityClassifier:
         has_negative = bool(negative_terms)
         title_has_negative = _contains_any(title, self.negative_service_terms)
         primary_has_negative = _contains_any(primary_text, self.negative_service_terms)
+        title_has_lease = _contains_any(title, self.lease_terms)
+        title_has_concession = _contains_any(title, self.concession_terms)
+
+        semantic = self._semantic_override(
+            title=title,
+            primary_text=primary_text,
+            full_text=full_text,
+            has_real_estate=has_real_estate,
+        )
+        if semantic is not None:
+            classification, semantic_score, semantic_rules = semantic
+            score += semantic_score
+            rules.extend(semantic_rules)
+            confidence = _confidence(classification, score, positive_terms, negative_terms)
+            return ClassificationDecision(
+                classification=classification,
+                confidence=confidence,
+                score=score,
+                positive_terms=positive_terms,
+                negative_terms=negative_terms,
+                rules_triggered=rules,
+                explanation=_explanation(
+                    classification,
+                    score,
+                    positive_terms,
+                    negative_terms,
+                    rules,
+                ),
+                requires_manual_review=classification
+                in {
+                    LandClassification.UNKNOWN,
+                    LandClassification.LAND_RELATED_SERVICE,
+                    LandClassification.WORKS_ON_EXISTING_PROPERTY,
+                }
+                or confidence < 0.8,
+            )
 
         strong_classification: LandClassification | None = None
         if (
@@ -308,15 +392,27 @@ class LandOpportunityClassifier:
             and not title_has_negative
         ):
             score += 90
-            rules.append("TITLE_LAND_ACQUISITION")
-            strong_classification = LandClassification.LAND_ACQUISITION
+            rules.append("TITLE_LAND_DEMAND")
+            strong_classification = LandClassification.LAND_DEMAND
         elif (
             (title_has_strong_sale or (title_has_sale and title_has_action_real_estate))
             and not title_has_negative
         ):
             score += 90
-            rules.append("TITLE_LAND_SALE")
-            strong_classification = LandClassification.LAND_SALE
+            rules.append("TITLE_LAND_SALE_PROCESS")
+            strong_classification = LandClassification.LAND_SALE_PROCESS
+        elif (
+            (title_has_lease or title_has_concession)
+            and title_has_action_real_estate
+            and not title_has_negative
+        ):
+            score += 84
+            if title_has_concession:
+                rules.append("TITLE_PROPERTY_FOR_CONCESSION")
+                strong_classification = LandClassification.PROPERTY_FOR_CONCESSION
+            else:
+                rules.append("TITLE_PROPERTY_FOR_LEASE")
+                strong_classification = LandClassification.PROPERTY_FOR_LEASE
         elif (
             (
                 primary_has_strong_acquisition
@@ -325,15 +421,15 @@ class LandOpportunityClassifier:
             and not primary_has_negative
         ):
             score += 75
-            rules.append("PRIMARY_LAND_ACQUISITION")
-            strong_classification = LandClassification.LAND_ACQUISITION
+            rules.append("PRIMARY_LAND_DEMAND")
+            strong_classification = LandClassification.LAND_DEMAND
         elif (
             (primary_has_strong_sale or (primary_has_sale and primary_has_action_real_estate))
             and not primary_has_negative
         ):
             score += 75
-            rules.append("PRIMARY_LAND_SALE")
-            strong_classification = LandClassification.LAND_SALE
+            rules.append("PRIMARY_LAND_SALE_PROCESS")
+            strong_classification = LandClassification.LAND_SALE_PROCESS
 
         if has_real_estate:
             score += 20
@@ -360,16 +456,14 @@ class LandOpportunityClassifier:
         elif has_negative and score < 0:
             classification = LandClassification.FALSE_POSITIVE
         elif has_real_estate and (has_housing or has_org or has_context):
-            classification = LandClassification.REAL_ESTATE
+            classification = LandClassification.UNKNOWN
         elif has_real_estate:
-            classification = LandClassification.POSSIBLE_LAND
+            classification = LandClassification.UNKNOWN
         else:
             classification = LandClassification.UNKNOWN
 
         confidence = _confidence(classification, score, positive_terms, negative_terms)
         requires_manual_review = classification in {
-            LandClassification.REAL_ESTATE,
-            LandClassification.POSSIBLE_LAND,
             LandClassification.UNKNOWN,
         } or confidence < 0.8
 
@@ -383,6 +477,46 @@ class LandOpportunityClassifier:
             explanation=_explanation(classification, score, positive_terms, negative_terms, rules),
             requires_manual_review=requires_manual_review,
         )
+
+    def _semantic_override(
+        self,
+        *,
+        title: str,
+        primary_text: str,
+        full_text: str,
+        has_real_estate: bool,
+    ) -> tuple[LandClassification, int, list[str]] | None:
+        if _contains_any(full_text, ["sitio web", "sitios web", "pagina web", "portal web"]):
+            return LandClassification.FALSE_POSITIVE, 90, ["NON_PROPERTY_WEB_CONTEXT"]
+        if _contains_any(full_text, self.valuation_or_study_terms):
+            return LandClassification.VALUATION_OR_STUDY, 84, ["VALUATION_OR_STUDY_CONTEXT"]
+        if _contains_any(full_text, self.goods_for_property_terms):
+            if has_real_estate or _contains_any(full_text, ["inmueble", "espacio publico"]):
+                return LandClassification.GOODS_FOR_PROPERTY, 82, ["GOODS_FOR_PROPERTY_CONTEXT"]
+        if _contains_any(full_text, self.works_on_existing_property_terms):
+            return (
+                LandClassification.WORKS_ON_EXISTING_PROPERTY,
+                78,
+                ["WORKS_ON_EXISTING_PROPERTY_CONTEXT"],
+            )
+        if _contains_any(title, self.concession_terms) and has_real_estate:
+            return (
+                LandClassification.PROPERTY_FOR_CONCESSION,
+                86,
+                ["TITLE_PROPERTY_FOR_CONCESSION"],
+            )
+        if _contains_any(title, self.lease_terms) and has_real_estate:
+            return LandClassification.PROPERTY_FOR_LEASE, 84, ["TITLE_PROPERTY_FOR_LEASE"]
+        if _contains_any(primary_text, self.acquisition_terms) and has_real_estate:
+            return LandClassification.LAND_DEMAND, 88, ["PUBLIC_BUYER_LAND_DEMAND"]
+        if _contains_any(primary_text, self.strong_sale_phrases) or (
+            _contains_any(primary_text, self.sale_terms)
+            and _contains_any(primary_text, self.action_real_estate_terms)
+        ):
+            return LandClassification.LAND_SALE_PROCESS, 86, ["LAND_SALE_PROCESS"]
+        if _contains_any(full_text, self.negative_service_terms):
+            return LandClassification.LAND_RELATED_SERVICE, 72, ["LAND_RELATED_SERVICE_CONTEXT"]
+        return None
 
 
 def _normalize_text(value: str) -> str:
@@ -430,12 +564,22 @@ def _confidence(
     positive_terms: list[str],
     negative_terms: list[str],
 ) -> float:
-    if classification in {LandClassification.LAND_ACQUISITION, LandClassification.LAND_SALE}:
+    if classification in {
+        LandClassification.PROPERTY_FOR_SALE,
+        LandClassification.PROPERTY_FOR_LEASE,
+        LandClassification.PROPERTY_FOR_CONCESSION,
+        LandClassification.LAND_DEMAND,
+        LandClassification.PROPERTY_DEMAND,
+        LandClassification.LAND_SALE_PROCESS,
+    }:
         base = 0.72 + min(max(score, 0), 120) / 500
-    elif classification == LandClassification.REAL_ESTATE:
-        base = 0.58 + min(max(score, 0), 80) / 600
-    elif classification == LandClassification.POSSIBLE_LAND:
-        base = 0.46 + min(max(score, 0), 60) / 700
+    elif classification in {
+        LandClassification.WORKS_ON_EXISTING_PROPERTY,
+        LandClassification.LAND_RELATED_SERVICE,
+        LandClassification.VALUATION_OR_STUDY,
+        LandClassification.GOODS_FOR_PROPERTY,
+    }:
+        base = 0.66 + min(max(score, 0), 100) / 600
     elif classification == LandClassification.FALSE_POSITIVE:
         base = 0.7 if negative_terms and not positive_terms else 0.62
     else:

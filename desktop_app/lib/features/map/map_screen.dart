@@ -718,11 +718,12 @@ LatLng? _propertyPoint(Map<String, dynamic> property) {
 
 bool _mappablePrecision(String precision) {
   return {
+    'PARCEL_POLYGON',
+    'EXACT_COORDINATES',
+    'VERIFIED_ADDRESS',
+    'STREET_ADDRESS',
     'EXACT',
-    'APPROXIMATE',
-    'CENTROID',
     'APPROXIMATE_PROPERTY',
-    'PROPERTY_COMMUNE_CENTROID',
   }.contains(precision);
 }
 
@@ -822,10 +823,16 @@ Color _markerColor(Map<String, dynamic> property) {
   if (method == 'manual') {
     return const Color(0xFF7C3AED);
   }
-  if (precision == 'EXACT' || precision == 'APPROXIMATE_PROPERTY') {
+  if (precision == 'PARCEL_POLYGON') {
+    return const Color(0xFF0F766E);
+  }
+  if (precision == 'EXACT' ||
+      precision == 'EXACT_COORDINATES' ||
+      precision == 'VERIFIED_ADDRESS' ||
+      precision == 'APPROXIMATE_PROPERTY') {
     return const Color(0xFF047857);
   }
-  if (precision == 'PROPERTY_COMMUNE_CENTROID' || precision == 'CENTROID') {
+  if (precision == 'STREET_ADDRESS' || precision == 'SECTOR') {
     return const Color(0xFFB45309);
   }
   return const Color(0xFF64748B);
@@ -840,11 +847,16 @@ String _locationLabel(Map<String, dynamic> property) {
   if (precision == 'EXACT') {
     return 'Exacta';
   }
-  if (precision == 'APPROXIMATE_PROPERTY' || precision == 'APPROXIMATE') {
-    return 'Aproximada';
+  if (precision == 'PARCEL_POLYGON') {
+    return 'Poligono oficial';
   }
-  if (precision == 'PROPERTY_COMMUNE_CENTROID' || precision == 'CENTROID') {
-    return 'Centroide';
+  if (precision == 'EXACT_COORDINATES' || precision == 'VERIFIED_ADDRESS') {
+    return 'Verificada';
+  }
+  if (precision == 'APPROXIMATE_PROPERTY' ||
+      precision == 'STREET_ADDRESS' ||
+      precision == 'SECTOR') {
+    return 'Aproximada';
   }
   return 'Sin precision';
 }

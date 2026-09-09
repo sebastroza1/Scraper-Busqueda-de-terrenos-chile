@@ -23,6 +23,7 @@ class LandfinderHome extends StatefulWidget {
 }
 
 class _LandfinderHomeState extends State<LandfinderHome> {
+  static const String _maskedSecret = '********';
   final TextEditingController _keywordAddController = TextEditingController();
   final TextEditingController _resultSearchController = TextEditingController();
   final TextEditingController _areaMinController = TextEditingController(
@@ -39,9 +40,11 @@ class _LandfinderHomeState extends State<LandfinderHome> {
   final TextEditingController _mercadoLibreClientSecretController =
       TextEditingController();
   final TextEditingController _mercadoLibreRedirectUriController =
-      TextEditingController(
-        text: 'http://127.0.0.1:8766/oauth/mercadolibre/callback',
-      );
+      TextEditingController();
+  final TextEditingController _mercadoLibrePartnerSellersController =
+      TextEditingController();
+  final TextEditingController _mercadoLibreImportController =
+      TextEditingController();
   final TextEditingController _manualTitleController = TextEditingController();
   final TextEditingController _manualRegionController = TextEditingController();
   final TextEditingController _manualCommuneController =
@@ -65,7 +68,9 @@ class _LandfinderHomeState extends State<LandfinderHome> {
   List<Map<String, dynamic>> _properties = [];
   List<Map<String, dynamic>> _events = [];
   Map<String, dynamic>? _sourceRecords;
-  Map<String, dynamic>? _customKeywordPreset;
+  Map<String, dynamic>? _mercadoLibreImportPreview;
+  Map<String, dynamic>? _mercadoLibreImportSummary;
+  List<Map<String, dynamic>> _mercadoLibreImportHistory = [];
   Map<String, dynamic> _settings = {};
   Map<String, dynamic>? _job;
   Map<String, dynamic>? _audit;
@@ -77,7 +82,7 @@ class _LandfinderHomeState extends State<LandfinderHome> {
   final Map<String, Map<String, dynamic>> _territoryByProperty = {};
   Set<String> _selectedSources = {};
   Set<String> _selectedEnrichmentSources = {'cmf_uf', 'minvu'};
-  Set<String> _selectedCommunes = {};
+  Map<String, dynamic>? _selectedCommune;
   final Map<String, bool> _keywordEnabled = {};
   String? _selectedRegionCode = 'ALL';
   String _keywordMode = 'ANY';
@@ -86,9 +91,18 @@ class _LandfinderHomeState extends State<LandfinderHome> {
   Timer? _jobTimer;
   bool _booting = true;
   bool _searching = false;
+  bool _discoverSoilMode = false;
+  bool _discoveringSoil = false;
+  bool _soilOnlyInsideUrbanLimit = false;
   bool _savingSettings = false;
   String? _testingCredentialSource;
   bool _connectingMercadoLibre = false;
+  bool _analyzingMercadoLibreImport = false;
+  bool _importingMercadoLibreItems = false;
+  bool _importVacantLand = true;
+  bool _importLandWithStructure = true;
+  bool _importUnknownLand = false;
+  bool _importNonLandProperty = false;
   bool _refreshingTerritory = false;
   bool _showLandLayer = true;
   bool _showUrbanLimitLayer = true;
@@ -122,6 +136,8 @@ class _LandfinderHomeState extends State<LandfinderHome> {
     _mercadoLibreClientIdController.dispose();
     _mercadoLibreClientSecretController.dispose();
     _mercadoLibreRedirectUriController.dispose();
+    _mercadoLibrePartnerSellersController.dispose();
+    _mercadoLibreImportController.dispose();
     _manualTitleController.dispose();
     _manualRegionController.dispose();
     _manualCommuneController.dispose();
@@ -201,6 +217,7 @@ class _LandfinderHomeState extends State<LandfinderHome> {
       );
       _ensureDefaultKeywords();
       _settings = Map<String, dynamic>.from(results[6] as Map);
+      _syncMercadoLibreCredentialFields();
       _properties = List<Map<String, dynamic>>.from(
         propertiesPayload['items'] as List? ?? const [],
       );
@@ -230,12 +247,13 @@ class _LandfinderHomeState extends State<LandfinderHome> {
           'minvu',
         }.intersection(enrichmentIds);
       }
-      _selectedCommunes = _selectedCommunes
-          .where(
-            (commune) =>
-                _communesCatalog.any((item) => item['name'] == commune),
-          )
-          .toSet();
+      if (_selectedCommune != null &&
+          !_communesCatalog.any(
+            (item) => item['commune_id'] == _selectedCommune?['commune_id'],
+          )) {
+        _selectedCommune = null;
+      }
+      _validateSelectedResult();
     });
     if (_latestSearchId != null) {
       await _refreshSourceRecords();
@@ -272,6 +290,48 @@ class _LandfinderHomeState extends State<LandfinderHome> {
           _error = error.toString();
           _searching = false;
         });
+      }
+    }
+  }
+
+  Future<void> _discoverSoil() async {
+    setState(() {
+      _discoveringSoil = true;
+      _error = null;
+    });
+    try {
+      final payload = await widget.api.discoverSoil({
+        'region': _selectedRegionName(),
+        'commune': _selectedCommuneName(),
+        'bbox': _soilDiscoveryBbox(),
+        'surface_min_m2': _numOrNull(_areaMinController.text),
+        'surface_max_m2': _numOrNull(_areaMaxController.text),
+        'limit': 100,
+        'offset': 0,
+        'only_inside_urban_limit': _soilOnlyInsideUrbanLimit,
+      });
+      if (mounted) {
+        final items = List<Map<String, dynamic>>.from(
+          payload['items'] as List? ?? const [],
+        );
+        setState(() {
+          _properties = items;
+          _sourceRecords = {
+            'items': [
+              for (final item in items) _soilSourceRecord(item),
+            ],
+          };
+          _section = AppSection.results;
+        });
+      }
+      await _refreshAll();
+    } catch (error) {
+      if (mounted) {
+        setState(() => _error = error.toString());
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _discoveringSoil = false);
       }
     }
   }
@@ -315,7 +375,7 @@ class _LandfinderHomeState extends State<LandfinderHome> {
         if (_selectedRegionCode != null && _selectedRegionCode != 'ALL')
           _selectedRegionCode,
       ],
-      'communes': _selectedCommunes.toList()..sort(),
+      'communes': [if (_selectedCommuneName() != null) _selectedCommuneName()],
       'keywords': _activeKeywords(),
       'keyword_mode': _keywordMode,
       'sources': _selectedSources.toList()..sort(),
@@ -347,6 +407,22 @@ class _LandfinderHomeState extends State<LandfinderHome> {
     ];
   }
 
+  List<String> _activeAdditionalKeywords() {
+    final presetKeywords = <String>{};
+    for (final preset in _keywordPresets) {
+      if (preset['id'] != 'BUSQUEDA_TERRENOS_CHILE') {
+        continue;
+      }
+      for (final item in preset['keywords'] as List? ?? const []) {
+        presetKeywords.add(item.toString());
+      }
+    }
+    return [
+      for (final keyword in _activeKeywords())
+        if (!presetKeywords.contains(keyword)) keyword,
+    ];
+  }
+
   Future<void> _loadCommunes(String regionCode) async {
     final payload = await widget.api.communes(regionCode);
     if (!mounted) {
@@ -357,9 +433,12 @@ class _LandfinderHomeState extends State<LandfinderHome> {
     );
     setState(() {
       _communesCatalog = communes;
-      _selectedCommunes = _selectedCommunes
-          .where((commune) => communes.any((item) => item['name'] == commune))
-          .toSet();
+      if (_selectedCommune != null &&
+          !communes.any(
+            (item) => item['commune_id'] == _selectedCommune?['commune_id'],
+          )) {
+        _selectedCommune = null;
+      }
     });
   }
 
@@ -401,8 +480,132 @@ class _LandfinderHomeState extends State<LandfinderHome> {
       limit: 500,
     );
     if (mounted) {
-      setState(() => _sourceRecords = records);
+      setState(() {
+        _sourceRecords = records;
+        _validateSelectedResult();
+      });
     }
+  }
+
+  String? _selectedCommuneName() {
+    return _selectedCommune?['commune_name']?.toString() ??
+        _selectedCommune?['name']?.toString();
+  }
+
+  String? _selectedCommuneRegionCode() {
+    return _selectedCommune?['region_id']?.toString() ??
+        _selectedCommune?['region_code']?.toString();
+  }
+
+  String? _selectedRegionName() {
+    final code = _selectedRegionCode;
+    if (code == null || code == 'ALL') {
+      return null;
+    }
+    for (final region in _regionsCatalog) {
+      if (region['code']?.toString() == code) {
+        return region['name']?.toString();
+      }
+    }
+    return code;
+  }
+
+  List<double> _soilDiscoveryBbox() {
+    final commune = _selectedCommuneName()?.toLowerCase() ?? '';
+    if (commune.contains('melipilla')) {
+      return [-71.30, -33.85, -70.95, -33.55];
+    }
+    if (commune.contains('talagante')) {
+      return [-70.98, -33.78, -70.78, -33.58];
+    }
+    if (commune.contains('paine')) {
+      return [-71.00, -33.95, -70.60, -33.70];
+    }
+    final region = (_selectedRegionName() ?? '').toLowerCase();
+    if (region.contains('metropolitana') || _selectedRegionCode == 'RM') {
+      return [-70.95, -33.65, -70.75, -33.45];
+    }
+    return [-70.95, -33.65, -70.75, -33.45];
+  }
+
+  double? _numOrNull(String value) {
+    final normalized = value.trim().replaceAll('.', '').replaceAll(',', '.');
+    if (normalized.isEmpty) {
+      return null;
+    }
+    return double.tryParse(normalized);
+  }
+
+  Map<String, dynamic> _soilSourceRecord(Map<String, dynamic> item) {
+    final rawPayload = _decodeMaybeJson(item['raw_payload_json']);
+    return {
+      'source_record_id': 'soil-${item['internal_id']}',
+      'property_id': item['internal_id'],
+      'source': item['source'],
+      'source_type': item['source_type'],
+      'external_id': item['external_id'],
+      'title': item['publication_title'],
+      'automatic_classification': 'CANDIDATO TERRITORIAL',
+      'automatic_confidence': 0.9,
+      'property_region': item['region'],
+      'property_commune': item['commune'],
+      'surface_m2': item['gross_area_m2'] ?? item['geometry_area_m2'],
+      'amount': null,
+      'currency': null,
+      'publication_date': null,
+      'organization': 'CIREN',
+      'raw_payload': rawPayload,
+    };
+  }
+
+  String _selectedCommuneSummary() {
+    final name = _selectedCommuneName();
+    return name == null || name.isEmpty ? 'Todas las comunas' : name;
+  }
+
+  void _applyCommuneChoice(Map<String, dynamic>? commune) {
+    _selectedCommune = commune;
+    final regionCode = commune == null ? null : _selectedCommuneRegionCode();
+    if (regionCode != null && regionCode.isNotEmpty) {
+      _selectedRegionCode = regionCode;
+      unawaited(_loadCommunes(regionCode));
+    }
+    _validateSelectedResult();
+  }
+
+  void _validateSelectedResult() {
+    final propertyId = _selectedProperty?['internal_id']?.toString();
+    if (propertyId != null && !_visiblePropertyIds().contains(propertyId)) {
+      _selectedProperty = null;
+    }
+    final recordId = _selectedSourceRecord?['source_record_id']?.toString();
+    if (recordId != null &&
+        !_filteredSourceRecordItems().any(
+          (record) => record['source_record_id']?.toString() == recordId,
+        )) {
+      _selectedSourceRecord = null;
+    }
+  }
+
+  Set<String> _visiblePropertyIds() {
+    final ids = <String>{};
+    final records = _filteredSourceRecordItems();
+    if (records.isNotEmpty || _sourceRecords != null) {
+      for (final record in records) {
+        final propertyId = record['property_id']?.toString();
+        if (propertyId != null && propertyId.isNotEmpty) {
+          ids.add(propertyId);
+        }
+      }
+      return ids;
+    }
+    for (final property in _properties) {
+      final propertyId = property['internal_id']?.toString();
+      if (propertyId != null && propertyId.isNotEmpty) {
+        ids.add(propertyId);
+      }
+    }
+    return ids;
   }
 
   Future<void> _updateManualClassification(
@@ -509,9 +712,12 @@ class _LandfinderHomeState extends State<LandfinderHome> {
       _error = null;
     });
     try {
+      final clientSecretText = _mercadoLibreClientSecretController.text.trim();
       final result = await widget.api.connectMercadoLibre(
         clientId: _mercadoLibreClientIdController.text,
-        clientSecret: _mercadoLibreClientSecretController.text,
+        clientSecret: clientSecretText == _maskedSecret
+            ? null
+            : clientSecretText,
         redirectUri: _mercadoLibreRedirectUriController.text,
       );
       if (mounted) {
@@ -530,6 +736,78 @@ class _LandfinderHomeState extends State<LandfinderHome> {
         setState(() => _connectingMercadoLibre = false);
       }
     }
+  }
+
+  Future<void> _analyzeMercadoLibreImport() async {
+    setState(() {
+      _analyzingMercadoLibreImport = true;
+      _error = null;
+      _mercadoLibreImportSummary = null;
+    });
+    try {
+      final preview = await widget.api.analyzeMercadoLibreImport(
+        _mercadoLibreImportController.text,
+      );
+      if (mounted) {
+        setState(() => _mercadoLibreImportPreview = preview);
+      }
+    } catch (error) {
+      if (mounted) {
+        setState(() => _error = error.toString());
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _analyzingMercadoLibreImport = false);
+      }
+    }
+  }
+
+  Future<void> _importMercadoLibreItems() async {
+    setState(() {
+      _importingMercadoLibreItems = true;
+      _error = null;
+    });
+    try {
+      final summary = await widget.api.importMercadoLibreItems(
+        _mercadoLibreImportController.text,
+        _mercadoLibreImportTypes(),
+      );
+      final history = await widget.api.mercadoLibreImportHistory();
+      if (mounted) {
+        setState(() {
+          _mercadoLibreImportSummary = summary;
+          _mercadoLibreImportHistory = List<Map<String, dynamic>>.from(
+            history['items'] as List? ?? const [],
+          );
+        });
+      }
+      await _refreshAll();
+    } catch (error) {
+      if (mounted) {
+        setState(() => _error = error.toString());
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _importingMercadoLibreItems = false);
+      }
+    }
+  }
+
+  void _clearMercadoLibreImport() {
+    setState(() {
+      _mercadoLibreImportController.clear();
+      _mercadoLibreImportPreview = null;
+      _mercadoLibreImportSummary = null;
+    });
+  }
+
+  List<String> _mercadoLibreImportTypes() {
+    return [
+      if (_importVacantLand) 'VACANT_LAND',
+      if (_importLandWithStructure) 'LAND_WITH_STRUCTURE',
+      if (_importUnknownLand) 'UNKNOWN',
+      if (_importNonLandProperty) 'NON_LAND_PROPERTY',
+    ];
   }
 
   Future<void> _exportExcel() async {
@@ -1007,7 +1285,7 @@ class _LandfinderHomeState extends State<LandfinderHome> {
       _error = null;
     });
     try {
-      final territory = await widget.api.refreshPropertyTerritory(
+      final territory = await widget.api.evaluatePropertyTerritory(
         propertyId,
         forceRefresh: forceRefresh,
       );
@@ -1054,6 +1332,31 @@ class _LandfinderHomeState extends State<LandfinderHome> {
         _secretStatus[mercadoLibreRefreshTokenKey] == true ||
         _settings['has_mercadolibre_access_token'] == true ||
         _settings['has_mercadolibre_refresh_token'] == true;
+  }
+
+  void _syncMercadoLibreCredentialFields() {
+    final clientId = _settings['mercadolibre_client_id']?.toString();
+    if (_mercadoLibreClientIdController.text.isEmpty &&
+        clientId != null &&
+        clientId.isNotEmpty) {
+      _mercadoLibreClientIdController.text = clientId;
+    }
+    final redirectUri = _settings['mercadolibre_redirect_uri']?.toString();
+    if (_mercadoLibreRedirectUriController.text.isEmpty &&
+        redirectUri != null &&
+        redirectUri.isNotEmpty) {
+      _mercadoLibreRedirectUriController.text = redirectUri;
+    }
+    if (_mercadoLibreClientSecretController.text.isEmpty &&
+        _settings['has_mercadolibre_client_secret'] == true) {
+      _mercadoLibreClientSecretController.text = _maskedSecret;
+    }
+    final sellers = _settings['mercadolibre_partner_seller_ids']?.toString();
+    if (_mercadoLibrePartnerSellersController.text.isEmpty &&
+        sellers != null &&
+        sellers.isNotEmpty) {
+      _mercadoLibrePartnerSellersController.text = sellers;
+    }
   }
 
   @override
@@ -1156,6 +1459,7 @@ class _LandfinderHomeState extends State<LandfinderHome> {
     return switch (_section) {
       AppSection.dashboard => 'MVP local con dos fuentes oficiales auditadas',
       AppSection.search => 'Filtros preliminares y progreso por etapas',
+      AppSection.mercadoLibreImport => 'Importacion manual por API oficial',
       AppSection.results => 'Candidatos normalizados y persistidos',
       AppSection.map => 'Vista local de coordenadas disponibles',
       AppSection.sources => 'Estado operativo y auditoria por conector',
@@ -1168,6 +1472,7 @@ class _LandfinderHomeState extends State<LandfinderHome> {
     return switch (_section) {
       AppSection.dashboard => _buildDashboard(),
       AppSection.search => _buildSearch(),
+      AppSection.mercadoLibreImport => _buildMercadoLibreImport(),
       AppSection.results => _buildResults(),
       AppSection.map => _buildMap(),
       AppSection.sources => _buildSources(),
@@ -1277,6 +1582,25 @@ class _LandfinderHomeState extends State<LandfinderHome> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
+          SegmentedButton<bool>(
+            segments: const [
+              ButtonSegment(
+                value: false,
+                icon: Icon(Icons.sell_outlined),
+                label: Text('Buscar ofertas'),
+              ),
+              ButtonSegment(
+                value: true,
+                icon: Icon(Icons.terrain_outlined),
+                label: Text('Descubrir suelo'),
+              ),
+            ],
+            selected: {_discoverSoilMode},
+            onSelectionChanged: (value) {
+              setState(() => _discoverSoilMode = value.first);
+            },
+          ),
+          const SizedBox(height: 16),
           Wrap(
             spacing: 12,
             runSpacing: 12,
@@ -1293,59 +1617,82 @@ class _LandfinderHomeState extends State<LandfinderHome> {
                 label: 'Sup. max m2',
                 icon: Icons.fit_screen_outlined,
               ),
-              _InputBox(
-                controller: _priceMinController,
-                label: 'Precio min CLP',
-                icon: Icons.payments_outlined,
-              ),
-              _InputBox(
-                controller: _priceMaxController,
-                label: 'Precio max CLP',
-                icon: Icons.price_check_outlined,
-              ),
+              if (!_discoverSoilMode) ...[
+                _InputBox(
+                  controller: _priceMinController,
+                  label: 'Precio min CLP',
+                  icon: Icons.payments_outlined,
+                ),
+                _InputBox(
+                  controller: _priceMaxController,
+                  label: 'Precio max CLP',
+                  icon: Icons.price_check_outlined,
+                ),
+              ],
             ],
           ),
-          const SizedBox(height: 16),
-          _buildKeywordSelector(),
-          const SizedBox(height: 16),
-          Card(
-            child: Padding(
-              padding: const EdgeInsets.all(16),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const _PanelTitle(
-                    icon: Icons.hub_outlined,
-                    title: 'Fuentes de busqueda',
-                  ),
-                  const SizedBox(height: 10),
-                  for (final source in _sources)
-                    _buildSearchSourceToggle(source),
-                  const Divider(height: 24),
-                  const _PanelTitle(
-                    icon: Icons.analytics_outlined,
-                    title: 'Servicios de analisis',
-                  ),
-                  const SizedBox(height: 10),
-                  for (final source in _enrichmentSources)
-                    _buildEnrichmentSourceToggle(source),
-                  const _DisabledServiceRow(label: 'SII'),
-                  const _DisabledServiceRow(label: 'DGA'),
-                  const _DisabledServiceRow(label: 'CONAF'),
-                ],
+          if (_discoverSoilMode) ...[
+            const SizedBox(height: 12),
+            CheckboxListTile(
+              contentPadding: EdgeInsets.zero,
+              value: _soilOnlyInsideUrbanLimit,
+              onChanged: (value) {
+                setState(() => _soilOnlyInsideUrbanLimit = value ?? false);
+              },
+              title: const Text('Solo dentro de limite urbano'),
+              controlAffinity: ListTileControlAffinity.leading,
+            ),
+          ] else ...[
+            const SizedBox(height: 16),
+            _buildKeywordSelector(),
+            const SizedBox(height: 16),
+            Card(
+              child: Padding(
+                padding: const EdgeInsets.all(16),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const _PanelTitle(
+                      icon: Icons.hub_outlined,
+                      title: 'Fuentes de busqueda',
+                    ),
+                    const SizedBox(height: 10),
+                    for (final source in _sources)
+                      _buildSearchSourceToggle(source),
+                    const Divider(height: 24),
+                    const _PanelTitle(
+                      icon: Icons.analytics_outlined,
+                      title: 'Servicios de analisis',
+                    ),
+                    const SizedBox(height: 10),
+                    for (final source in _enrichmentSources)
+                      _buildEnrichmentSourceToggle(source),
+                    const _DisabledServiceRow(label: 'SII'),
+                    const _DisabledServiceRow(label: 'DGA'),
+                    const _DisabledServiceRow(label: 'CONAF'),
+                  ],
+                ),
               ),
             ),
-          ),
+          ],
           const SizedBox(height: 16),
           FilledButton.icon(
-            onPressed: _searching ? null : _startSearch,
-            icon: _searching
+            onPressed: _searching || _discoveringSoil
+                ? null
+                : _discoverSoilMode
+                ? _discoverSoil
+                : _startSearch,
+            icon: _searching || _discoveringSoil
                 ? const SizedBox.square(
                     dimension: 18,
                     child: CircularProgressIndicator(strokeWidth: 2),
                   )
                 : const Icon(Icons.play_arrow_outlined),
-            label: Text(_searching ? 'Buscando' : 'Iniciar busqueda'),
+            label: Text(
+              _discoverSoilMode
+                  ? (_discoveringSoil ? 'Buscando predios' : 'Buscar predios')
+                  : (_searching ? 'Buscando' : 'Iniciar busqueda'),
+            ),
           ),
           const SizedBox(height: 18),
           _buildJobPanel(),
@@ -1392,7 +1739,8 @@ class _LandfinderHomeState extends State<LandfinderHome> {
           }
           setState(() {
             _selectedRegionCode = value;
-            _selectedCommunes.clear();
+            _selectedCommune = null;
+            _validateSelectedResult();
           });
           unawaited(_loadCommunes(value));
         },
@@ -1401,41 +1749,36 @@ class _LandfinderHomeState extends State<LandfinderHome> {
   }
 
   Widget _buildCommuneSelector() {
-    final allActive = _selectedCommunes.isEmpty;
     final catalogUnavailable = _communesCatalog.isEmpty;
-    final addLabel = catalogUnavailable ? 'Cargar comunas' : 'Agregar comuna';
+    final addLabel = catalogUnavailable ? 'Cargar comunas' : 'Cambiar';
     return SizedBox(
-      width: 360,
-      child: InputDecorator(
-        decoration: const InputDecoration(
-          border: OutlineInputBorder(
-            borderRadius: BorderRadius.all(Radius.circular(8)),
-          ),
-          prefixIcon: Icon(Icons.location_city_outlined),
-          labelText: 'Comunas',
-          isDense: true,
-        ),
-        child: Wrap(
-          spacing: 6,
-          runSpacing: 6,
-          crossAxisAlignment: WrapCrossAlignment.center,
-          children: [
-            if (allActive)
-              const Chip(label: Text('Todas las comunas'))
-            else
-              for (final commune in _selectedCommunes.toList()..sort())
-                InputChip(
-                  label: Text(commune),
-                  onDeleted: () {
-                    setState(() => _selectedCommunes.remove(commune));
-                  },
-                ),
-            ActionChip(
-              avatar: const Icon(Icons.add_outlined, size: 18),
-              label: Text(addLabel),
-              onPressed: () => unawaited(_showCommunePicker()),
+      width: 300,
+      child: InkWell(
+        borderRadius: BorderRadius.circular(8),
+        onTap: () => unawaited(_showCommunePicker()),
+        child: InputDecorator(
+          decoration: const InputDecoration(
+            border: OutlineInputBorder(
+              borderRadius: BorderRadius.all(Radius.circular(8)),
             ),
-          ],
+            prefixIcon: Icon(Icons.location_city_outlined),
+            labelText: 'Comuna',
+            isDense: true,
+          ),
+          child: Row(
+            children: [
+              Expanded(
+                child: Text(
+                  _selectedCommuneSummary(),
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+              TextButton(
+                onPressed: () => unawaited(_showCommunePicker()),
+                child: Text(addLabel),
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -1448,7 +1791,9 @@ class _LandfinderHomeState extends State<LandfinderHome> {
         return;
       }
     }
-    final selected = Set<String>.from(_selectedCommunes);
+    Map<String, dynamic>? selected = _selectedCommune == null
+        ? null
+        : Map<String, dynamic>.from(_selectedCommune!);
     String query = '';
     String normalize(String value) => value
         .toLowerCase()
@@ -1458,8 +1803,9 @@ class _LandfinderHomeState extends State<LandfinderHome> {
         .replaceAll(RegExp('[óòöô]'), 'o')
         .replaceAll(RegExp('[úùüû]'), 'u')
         .replaceAll('ñ', 'n');
-    final result = await showDialog<Set<String>>(
+    final result = await showDialog<Map<String, dynamic>>(
       context: context,
+      barrierDismissible: true,
       builder: (context) {
         return StatefulBuilder(
           builder: (context, setDialogState) {
@@ -1477,65 +1823,86 @@ class _LandfinderHomeState extends State<LandfinderHome> {
               );
               return haystack.contains(normalizedQuery);
             }).toList();
-            return AlertDialog(
-              title: const Text('Seleccionar comunas'),
-              content: SizedBox(
-                width: 620,
-                height: 560,
+            return Dialog(
+              child: ConstrainedBox(
+                constraints: BoxConstraints(
+                  maxWidth: 620,
+                  maxHeight: MediaQuery.of(context).size.height * 0.75,
+                ),
                 child: Column(
+                  mainAxisSize: MainAxisSize.min,
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    TextField(
-                      decoration: const InputDecoration(
-                        border: OutlineInputBorder(
-                          borderRadius: BorderRadius.all(Radius.circular(8)),
-                        ),
-                        prefixIcon: Icon(Icons.search_outlined),
-                        hintText: 'Buscar comuna o region',
-                        isDense: true,
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(20, 18, 20, 12),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const _PanelTitle(
+                            icon: Icons.location_city_outlined,
+                            title: 'Seleccionar comuna',
+                          ),
+                          const SizedBox(height: 12),
+                          TextField(
+                            autofocus: true,
+                            decoration: const InputDecoration(
+                              border: OutlineInputBorder(
+                                borderRadius: BorderRadius.all(
+                                  Radius.circular(8),
+                                ),
+                              ),
+                              prefixIcon: Icon(Icons.search_outlined),
+                              hintText: 'Buscar comuna o region',
+                              isDense: true,
+                            ),
+                            onChanged: (value) {
+                              setDialogState(() => query = value);
+                            },
+                          ),
+                        ],
                       ),
-                      onChanged: (value) {
-                        setDialogState(() => query = value);
-                      },
                     ),
-                    const SizedBox(height: 12),
-                    CheckboxListTile(
-                      dense: true,
-                      contentPadding: EdgeInsets.zero,
-                      value: selected.isEmpty,
-                      onChanged: (_) {
-                        setDialogState(selected.clear);
-                      },
-                      title: const Text('Todas las comunas'),
-                      subtitle: Text(
-                        selected.isEmpty
-                            ? 'Sin filtro comunal'
-                            : '${selected.length} seleccionadas',
-                      ),
-                    ),
-                    const Divider(height: 12),
+                    const Divider(height: 1),
                     Expanded(
                       child: filtered.isEmpty
                           ? const Center(
                               child: Text('No hay comunas para mostrar.'),
                             )
                           : ListView.builder(
-                              itemCount: filtered.length,
+                              padding: EdgeInsets.zero,
+                              itemCount: filtered.length + 1,
                               itemBuilder: (context, index) {
-                                final commune = filtered[index];
-                                final name = commune['name']?.toString() ?? '';
+                                if (index == 0) {
+                                  return CheckboxListTile(
+                                    dense: true,
+                                    value: selected == null,
+                                    onChanged: (_) {
+                                      setDialogState(() => selected = null);
+                                    },
+                                    title: const Text('Todas las comunas'),
+                                    subtitle: const Text('Sin filtro comunal'),
+                                  );
+                                }
+                                final commune = filtered[index - 1];
+                                final id =
+                                    commune['commune_id']?.toString() ??
+                                    commune['code']?.toString() ??
+                                    '';
+                                final name =
+                                    commune['commune_name']?.toString() ??
+                                    commune['name']?.toString() ??
+                                    '';
                                 final regionName = commune['region_name']
                                     ?.toString();
                                 return CheckboxListTile(
                                   dense: true,
-                                  value: selected.contains(name),
-                                  onChanged: (value) {
+                                  value:
+                                      selected?['commune_id']?.toString() == id,
+                                  onChanged: (_) {
                                     setDialogState(() {
-                                      if (value == true) {
-                                        selected.add(name);
-                                      } else {
-                                        selected.remove(name);
-                                      }
+                                      selected = Map<String, dynamic>.from(
+                                        commune,
+                                      );
                                     });
                                   },
                                   title: Text(name),
@@ -1546,40 +1913,68 @@ class _LandfinderHomeState extends State<LandfinderHome> {
                               },
                             ),
                     ),
+                    const Divider(height: 1),
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.end,
+                        children: [
+                          TextButton(
+                            onPressed: () {
+                              setDialogState(() => selected = null);
+                            },
+                            child: const Text('Limpiar'),
+                          ),
+                          const SizedBox(width: 8),
+                          TextButton(
+                            onPressed: () => Navigator.of(context).pop(),
+                            child: const Text('Cancelar'),
+                          ),
+                          const SizedBox(width: 8),
+                          FilledButton(
+                            onPressed: () {
+                              Navigator.of(
+                                context,
+                              ).pop(selected ?? {'__all': true});
+                            },
+                            child: const Text('Aplicar'),
+                          ),
+                        ],
+                      ),
+                    ),
                   ],
                 ),
               ),
-              actions: [
-                TextButton(
-                  onPressed: () {
-                    setDialogState(selected.clear);
-                  },
-                  child: const Text('Limpiar'),
-                ),
-                TextButton(
-                  onPressed: () => Navigator.of(context).pop(),
-                  child: const Text('Cancelar'),
-                ),
-                FilledButton(
-                  onPressed: () => Navigator.of(context).pop(selected),
-                  child: const Text('Aplicar'),
-                ),
-              ],
             );
           },
         );
       },
     );
     if (result != null && mounted) {
-      setState(() => _selectedCommunes = result);
+      setState(() {
+        if (result['__all'] == true) {
+          _applyCommuneChoice(null);
+        } else {
+          _applyCommuneChoice(result);
+        }
+      });
     }
   }
 
   Widget _buildKeywordSelector() {
-    final presets = [
-      ..._keywordPresets,
-      if (_customKeywordPreset != null) _customKeywordPreset!,
-    ];
+    final activePreset = _keywordPresets.firstWhere(
+      (item) => item['id'] == 'BUSQUEDA_TERRENOS_CHILE',
+      orElse: () =>
+          _keywordPresets.isEmpty ? <String, dynamic>{} : _keywordPresets.first,
+    );
+    final groups = List<Map<String, dynamic>>.from(
+      (activePreset['groups'] as List? ?? const []).whereType<Map>().map(
+        (item) => Map<String, dynamic>.from(item),
+      ),
+    );
+    final exclusions = List<Object>.from(
+      activePreset['exclusions'] as List? ?? const [],
+    );
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(16),
@@ -1591,86 +1986,17 @@ class _LandfinderHomeState extends State<LandfinderHome> {
                 const Expanded(
                   child: _PanelTitle(
                     icon: Icons.search_outlined,
-                    title: 'Palabras clave',
+                    title: 'Busqueda inteligente',
                   ),
                 ),
-                SegmentedButton<String>(
-                  segments: const [
-                    ButtonSegment(value: 'ANY', label: Text('ANY')),
-                    ButtonSegment(value: 'ALL', label: Text('ALL')),
-                  ],
-                  selected: {_keywordMode},
-                  onSelectionChanged: (value) {
-                    setState(() => _keywordMode = value.first);
-                  },
-                ),
+                Switch(value: true, onChanged: null),
               ],
             ),
-            const SizedBox(height: 10),
-            Wrap(
-              spacing: 8,
-              runSpacing: 8,
-              children: [
-                for (final preset in presets)
-                  ActionChip(
-                    avatar: const Icon(Icons.bookmarks_outlined, size: 18),
-                    label: Text(preset['name']?.toString() ?? ''),
-                    onPressed: () {
-                      setState(() => _applyPreset(preset, replace: false));
-                    },
-                  ),
-                OutlinedButton.icon(
-                  onPressed: () {
-                    final recommended = _keywordPresets.firstWhere(
-                      (item) => item['id'] == 'BUSQUEDA_TERRENOS_CHILE',
-                      orElse: () => _keywordPresets.isEmpty
-                          ? <String, dynamic>{}
-                          : _keywordPresets.first,
-                    );
-                    setState(() => _applyPreset(recommended, replace: true));
-                  },
-                  icon: const Icon(Icons.restore_outlined),
-                  label: const Text('Restaurar recomendadas'),
-                ),
-                OutlinedButton.icon(
-                  onPressed: _activeKeywords().isEmpty
-                      ? null
-                      : () {
-                          setState(() {
-                            _customKeywordPreset = {
-                              'id': 'CUSTOM_LOCAL',
-                              'name': 'Personalizado',
-                              'keywords': _activeKeywords(),
-                              'default_mode': _keywordMode,
-                            };
-                          });
-                        },
-                  icon: const Icon(Icons.save_outlined),
-                  label: const Text('Guardar preset'),
-                ),
-              ],
-            ),
-            const SizedBox(height: 12),
-            Wrap(
-              spacing: 8,
-              runSpacing: 8,
-              children: [
-                for (final entry in _keywordEnabled.entries)
-                  InputChip(
-                    selected: entry.value,
-                    label: Text(entry.key),
-                    onSelected: (value) {
-                      setState(() => _keywordEnabled[entry.key] = value);
-                    },
-                    onDeleted: () {
-                      setState(() => _keywordEnabled.remove(entry.key));
-                    },
-                  ),
-              ],
-            ),
+            const SizedBox(height: 6),
+            Text('Activada', style: Theme.of(context).textTheme.bodyMedium),
             const SizedBox(height: 12),
             SizedBox(
-              width: 360,
+              width: 420,
               child: TextField(
                 controller: _keywordAddController,
                 decoration: InputDecoration(
@@ -1678,7 +2004,7 @@ class _LandfinderHomeState extends State<LandfinderHome> {
                     borderRadius: BorderRadius.all(Radius.circular(8)),
                   ),
                   prefixIcon: const Icon(Icons.add_outlined),
-                  labelText: 'Agregar palabra',
+                  labelText: 'Palabras adicionales (opcional)',
                   suffixIcon: IconButton(
                     tooltip: 'Agregar',
                     onPressed: _addKeyword,
@@ -1687,6 +2013,49 @@ class _LandfinderHomeState extends State<LandfinderHome> {
                 ),
                 onSubmitted: (_) => _addKeyword(),
               ),
+            ),
+            if (_activeAdditionalKeywords().isNotEmpty) ...[
+              const SizedBox(height: 10),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  for (final keyword in _activeAdditionalKeywords())
+                    InputChip(
+                      label: Text(keyword),
+                      onDeleted: () {
+                        setState(() => _keywordEnabled.remove(keyword));
+                      },
+                    ),
+                ],
+              ),
+            ],
+            const SizedBox(height: 8),
+            ExpansionTile(
+              tilePadding: EdgeInsets.zero,
+              childrenPadding: EdgeInsets.zero,
+              title: const Text('Configuracion avanzada'),
+              children: [
+                _DetailLine(
+                  label: 'Preset activo',
+                  value: _knownText(activePreset['name']),
+                ),
+                _DetailLine(
+                  label: 'Terminos internos',
+                  value: _activeKeywords().length.toString(),
+                ),
+                _DetailLine(label: 'Modo', value: _keywordMode),
+                _DetailLine(
+                  label: 'Grupos habilitados',
+                  value: groups
+                      .map((item) => '${item['id']} (${item['term_count']})')
+                      .join(', '),
+                ),
+                _DetailLine(
+                  label: 'Exclusiones',
+                  value: exclusions.length.toString(),
+                ),
+              ],
             ),
           ],
         ),
@@ -2003,6 +2372,8 @@ class _LandfinderHomeState extends State<LandfinderHome> {
 
   DataRow _sourceRecordRow(Map<String, dynamic> record) {
     final property = _propertyForSourceRecord(record);
+    final isCadastral = record['source'] == 'ciren_rural_properties' ||
+        record['automatic_classification'] == 'CANDIDATO TERRITORIAL';
     final selected =
         _selectedSourceRecord?['source_record_id'] ==
         record['source_record_id'];
@@ -2021,7 +2392,13 @@ class _LandfinderHomeState extends State<LandfinderHome> {
         ),
         DataCell(Text(_knownText(record['source']))),
         DataCell(Text(_sourceTypeLabel(record['source_type']))),
-        DataCell(Text(_knownText(record['automatic_classification']))),
+        DataCell(
+          Text(
+            isCadastral
+                ? 'CANDIDATO TERRITORIAL'
+                : _knownText(record['automatic_classification']),
+          ),
+        ),
         DataCell(Text(_confidenceText(record['automatic_confidence']))),
         DataCell(
           Text(_knownText(record['property_region'] ?? record['region'])),
@@ -2030,14 +2407,14 @@ class _LandfinderHomeState extends State<LandfinderHome> {
           Text(_knownText(record['property_commune'] ?? record['commune'])),
         ),
         DataCell(Text(_knownNumber(record['surface_m2'], suffix: ' m2'))),
-        DataCell(Text(_amountText(record))),
-        DataCell(Text(_knownNumber(property?['asking_price_uf']))),
+        DataCell(Text(isCadastral ? '-' : _amountText(record))),
+        DataCell(Text(isCadastral ? '-' : _knownNumber(property?['asking_price_uf']))),
         DataCell(Text(_knownText(record['publication_date']))),
         DataCell(
           SizedBox(
             width: 220,
             child: Text(
-              _knownText(record['organization']),
+              isCadastral ? 'CIREN' : _knownText(record['organization']),
               overflow: TextOverflow.ellipsis,
             ),
           ),
@@ -2098,6 +2475,7 @@ class _LandfinderHomeState extends State<LandfinderHome> {
   }
 
   Widget _buildResultDetailPanel() {
+    _validateSelectedResult();
     final record = _selectedSourceRecord;
     if (record != null) {
       final property = _propertyForSourceRecord(record);
@@ -2253,13 +2631,25 @@ class _LandfinderHomeState extends State<LandfinderHome> {
         ),
       );
     }
-    return _buildPropertyDetail();
+    final property = _selectedProperty;
+    if (property != null &&
+        _visiblePropertyIds().contains(property['internal_id']?.toString())) {
+      return _buildPropertyDetail(allowFallback: false);
+    }
+    return const Card(
+      child: Center(
+        child: Padding(
+          padding: EdgeInsets.all(24),
+          child: Text('Selecciona una fila visible para ver el detalle.'),
+        ),
+      ),
+    );
   }
 
-  Widget _buildPropertyDetail() {
+  Widget _buildPropertyDetail({bool allowFallback = true}) {
     final property =
         _selectedProperty ??
-        (_properties.isNotEmpty ? _properties.first : null);
+        (allowFallback && _properties.isNotEmpty ? _properties.first : null);
     if (property == null) {
       return const SizedBox.shrink();
     }
@@ -2350,7 +2740,7 @@ class _LandfinderHomeState extends State<LandfinderHome> {
                   ),
                 ),
                 IconButton.filledTonal(
-                  tooltip: 'Actualizar informacion territorial',
+                  tooltip: 'Evaluar territorialmente',
                   onPressed:
                       _refreshingTerritory ||
                           !_hasValidPropertyLocation(property)
@@ -2367,9 +2757,7 @@ class _LandfinderHomeState extends State<LandfinderHome> {
             ),
             const SizedBox(height: 12),
             if (!_hasValidPropertyLocation(property))
-              const _EmptyLine(
-                text: 'Analisis MINVU pendiente: falta ubicacion del predio.',
-              )
+              const _EmptyLine(text: 'Analisis pendiente: falta geometria o ubicacion.'),
             else
               const SizedBox.shrink(),
             _buildTerritorySection(property),
@@ -2388,12 +2776,17 @@ class _LandfinderHomeState extends State<LandfinderHome> {
     final urban = _asMap(territory?['urban_limit']);
     final risk = _asMap(territory?['risk_intersection']);
     final prc = _asMap(territory?['prc']);
+    final assessment = _asMap(territory?['preliminary_assessment']);
+    final mma = _asMap(assessment['mma']);
+    final dga = _asMap(assessment['dga']);
+    final mop = _asMap(assessment['mop']);
     final evidence = List<Map<String, dynamic>>.from(
       (territory?['evidence'] as List? ?? const []).whereType<Map>().map(
         (item) => Map<String, dynamic>.from(item),
       ),
     );
     final territoryProperty = _asMap(territory?['property']);
+    final adminValidation = _asMap(territory?['admin_validation'] ?? property);
     final provenance = List<Map<String, dynamic>>.from(
       ((territory?['data_provenance'] ?? territoryProperty['data_provenance'])
                   as List? ??
@@ -2431,6 +2824,8 @@ class _LandfinderHomeState extends State<LandfinderHome> {
             property['location_precision'] ?? metrics['geometry_status'],
           ),
         ),
+        _MiniSectionTitle('Validacion de ubicacion'),
+        _buildAdminValidationSection(adminValidation),
         _MiniSectionTitle('Predio'),
         _DetailLine(
           label: 'Superficie publicada',
@@ -2488,6 +2883,40 @@ class _LandfinderHomeState extends State<LandfinderHome> {
           label: 'Precision',
           value: _knownText(riskValue['analysis_precision']),
         ),
+        _MiniSectionTitle('Ambiente'),
+        _DetailLine(
+          label: 'Area protegida',
+          value: _knownText(mma['protected_area']),
+        ),
+        _DetailLine(label: 'Humedal', value: _knownText(mma['wetland'])),
+        _MiniSectionTitle('Agua'),
+        _DetailLine(
+          label: 'Restriccion DGA',
+          value: _knownText(dga['restriction']),
+        ),
+        _DetailLine(
+          label: 'Derechos cercanos',
+          value: _knownText(dga['water_rights_nearby']),
+        ),
+        _MiniSectionTitle('Accesibilidad'),
+        _DetailLine(
+          label: 'Via MOP mas cercana',
+          value: _knownNumber(mop['distance_to_mop_road_m'], suffix: ' m'),
+        ),
+        const _EmptyLine(
+          text: 'Distancia territorial; no acredita acceso juridico o servidumbre.',
+        ),
+        _MiniSectionTitle('Resultado preliminar'),
+        _DetailLine(
+          label: 'Estado',
+          value: _knownText(
+            assessment['status'] ?? property['territorial_status'],
+          ),
+        ),
+        const _EmptyLine(
+          text:
+              'Esta evaluacion es preliminar y no reemplaza certificados, permisos ni analisis normativo oficial.',
+        ),
         _MiniSectionTitle('Procedencia de informacion'),
         _buildProvenanceSection(provenance),
         _MiniSectionTitle('Fuentes y evidencia'),
@@ -2503,6 +2932,64 @@ class _LandfinderHomeState extends State<LandfinderHome> {
         ),
         const SizedBox(height: 8),
         _buildEvidenceSection(evidence),
+      ],
+    );
+  }
+
+  Widget _buildAdminValidationSection(Map<String, dynamic> validation) {
+    final status = _knownText(validation['admin_validation_status']);
+    final isConflict = {
+      'COMMUNE_MISMATCH',
+      'REGION_MISMATCH',
+      'COMMUNE_AND_REGION_MISMATCH',
+      'OUTSIDE_CHILE',
+      'GEOMETRY_INVALID',
+    }.contains(status.toUpperCase());
+    final icon = isConflict
+        ? Icons.warning_amber_outlined
+        : Icons.check_circle_outline;
+    final color = isConflict ? Colors.orange.shade800 : Colors.green.shade700;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Icon(icon, color: color, size: 18),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                isConflict
+                    ? 'Conflicto de ubicacion'
+                    : _adminStatusLabel(status),
+                style: TextStyle(color: color, fontWeight: FontWeight.w600),
+              ),
+            ),
+          ],
+        ),
+        _DetailLine(
+          label: 'Fuente',
+          value:
+              '${_knownText(validation['source_commune'])}, ${_knownText(validation['source_region'])}',
+        ),
+        _DetailLine(
+          label: 'Geometria',
+          value:
+              '${_knownText(validation['calculated_commune'])}, ${_knownText(validation['calculated_region'])}',
+        ),
+        _DetailLine(
+          label: 'CRS',
+          value:
+              '${_knownText(validation['source_epsg'])} -> ${_knownText(validation['normalized_epsg'])}',
+        ),
+        if (isConflict)
+          const _EmptyLine(
+            text: 'Analisis territorial bloqueado hasta revisar ubicacion.',
+          )
+        else
+          _DetailLine(
+            label: 'Motivo',
+            value: _knownText(validation['admin_validation_reason']),
+          ),
       ],
     );
   }
@@ -2968,6 +3455,215 @@ class _LandfinderHomeState extends State<LandfinderHome> {
     );
   }
 
+  Widget _buildMercadoLibreImport() {
+    final preview = _mercadoLibreImportPreview;
+    final items = List<Map<String, dynamic>>.from(
+      preview?['items'] as List? ?? const [],
+    );
+    return SingleChildScrollView(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const _PanelTitle(
+                    icon: Icons.add_link_outlined,
+                    title: 'Importar publicaciones Mercado Libre',
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    'Pega URLs o IDs de publicaciones de Mercado Libre/PortalInmobiliario. Landfinder extraera los IDs, consultara la API oficial y agregara los terrenos validos.',
+                    style: Theme.of(context).textTheme.bodyMedium,
+                  ),
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: _mercadoLibreImportController,
+                    minLines: 8,
+                    maxLines: 12,
+                    decoration: const InputDecoration(
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.all(Radius.circular(8)),
+                      ),
+                      labelText: 'URLs o IDs MLC',
+                      alignLabelWithHint: true,
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  Wrap(
+                    spacing: 10,
+                    runSpacing: 8,
+                    crossAxisAlignment: WrapCrossAlignment.center,
+                    children: [
+                      FilterChip(
+                        selected: _importVacantLand,
+                        label: const Text('VACANT_LAND'),
+                        onSelected: (value) =>
+                            setState(() => _importVacantLand = value),
+                      ),
+                      FilterChip(
+                        selected: _importLandWithStructure,
+                        label: const Text('LAND_WITH_STRUCTURE'),
+                        onSelected: (value) =>
+                            setState(() => _importLandWithStructure = value),
+                      ),
+                      FilterChip(
+                        selected: _importUnknownLand,
+                        label: const Text('UNKNOWN'),
+                        onSelected: (value) =>
+                            setState(() => _importUnknownLand = value),
+                      ),
+                      FilterChip(
+                        selected: _importNonLandProperty,
+                        label: const Text('NON_LAND_PROPERTY'),
+                        onSelected: (value) =>
+                            setState(() => _importNonLandProperty = value),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 12),
+                  Wrap(
+                    spacing: 10,
+                    runSpacing: 10,
+                    children: [
+                      FilledButton.icon(
+                        onPressed: _analyzingMercadoLibreImport
+                            ? null
+                            : _analyzeMercadoLibreImport,
+                        icon: _analyzingMercadoLibreImport
+                            ? const SizedBox.square(
+                                dimension: 18,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                ),
+                              )
+                            : const Icon(Icons.manage_search_outlined),
+                        label: Text(
+                          _analyzingMercadoLibreImport
+                              ? 'Analizando'
+                              : 'Analizar',
+                        ),
+                      ),
+                      OutlinedButton.icon(
+                        onPressed: _importingMercadoLibreItems
+                            ? null
+                            : _importMercadoLibreItems,
+                        icon: _importingMercadoLibreItems
+                            ? const SizedBox.square(
+                                dimension: 18,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                ),
+                              )
+                            : const Icon(Icons.file_upload_outlined),
+                        label: Text(
+                          _importingMercadoLibreItems
+                              ? 'Importando'
+                              : 'Importar validos',
+                        ),
+                      ),
+                      TextButton.icon(
+                        onPressed: _clearMercadoLibreImport,
+                        icon: const Icon(Icons.clear_outlined),
+                        label: const Text('Limpiar'),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ),
+          if (preview != null) ...[
+            const SizedBox(height: 12),
+            _MercadoLibreImportSummary(preview: preview),
+          ],
+          if (items.isNotEmpty) ...[
+            const SizedBox(height: 12),
+            Card(
+              child: Padding(
+                padding: const EdgeInsets.all(12),
+                child: SingleChildScrollView(
+                  scrollDirection: Axis.horizontal,
+                  child: DataTable(
+                    columns: const [
+                      DataColumn(label: Text('Estado item')),
+                      DataColumn(label: Text('Item ID')),
+                      DataColumn(label: Text('Titulo')),
+                      DataColumn(label: Text('Seller ID')),
+                      DataColumn(label: Text('Tienda oficial ID')),
+                      DataColumn(label: Text('Seller')),
+                      DataColumn(label: Text('Estado expansion seller')),
+                      DataColumn(label: Text('Tipo')),
+                      DataColumn(label: Text('Precio')),
+                      DataColumn(label: Text('Superficie terreno')),
+                      DataColumn(label: Text('Region')),
+                      DataColumn(label: Text('Comuna')),
+                      DataColumn(label: Text('Resultado')),
+                    ],
+                    rows: [
+                      for (final item in items)
+                        DataRow(
+                          cells: [
+                            DataCell(Text(_value(item['item_status']))),
+                            DataCell(Text(_value(item['item_id']))),
+                            DataCell(
+                              SizedBox(
+                                width: 260,
+                                child: Text(
+                                  _value(item['title']),
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                              ),
+                            ),
+                            DataCell(Text(_value(item['seller_id']))),
+                            DataCell(Text(_value(item['official_store_id']))),
+                            DataCell(Text(_value(item['seller_nickname']))),
+                            DataCell(
+                              Text(_value(item['seller_expansion_status'])),
+                            ),
+                            DataCell(Text(_value(item['type']))),
+                            DataCell(Text(_value(item['price']))),
+                            DataCell(Text(_value(item['surface']))),
+                            DataCell(Text(_value(item['region']))),
+                            DataCell(Text(_value(item['commune']))),
+                            DataCell(Text(_value(item['result']))),
+                          ],
+                        ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ],
+          if (_mercadoLibreImportSummary != null) ...[
+            const SizedBox(height: 12),
+            _MercadoLibreImportSummary(preview: _mercadoLibreImportSummary!),
+          ],
+          if (_mercadoLibreImportHistory.isNotEmpty) ...[
+            const SizedBox(height: 12),
+            Text(
+              'Ultimas importaciones',
+              style: Theme.of(context).textTheme.titleMedium,
+            ),
+            const SizedBox(height: 8),
+            for (final item in _mercadoLibreImportHistory.take(5))
+              Text(
+                '${_value(item['imported_at'])} | entradas ${_value(item['entries'])} | nuevos ${_value(item['new'])} | actualizados ${_value(item['updated'])} | descartados ${_value(item['discarded'])}',
+              ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  String _value(Object? value) {
+    final text = value?.toString() ?? '';
+    return text.isEmpty ? '-' : text;
+  }
+
   Widget _buildExports() {
     return SingleChildScrollView(
       child: Column(
@@ -3094,13 +3790,22 @@ class _LandfinderHomeState extends State<LandfinderHome> {
                   ),
                   const SizedBox(height: 14),
                   _CredentialSourceCard(
-                    title: 'Mercado Libre',
+                    title: 'Mercado Libre / PortalInmobiliario',
                     subtitle:
-                        'Conexion OAuth con Authorization Code y PKCE; los tokens quedan en almacenamiento seguro.',
+                        'Conexion OAuth con Authorization Code; los tokens quedan en el backend local.',
                     configured: mercadoLibreConfigured,
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
+                        Text('Estado: PARTIAL'),
+                        Text(
+                          'OAuth: ${mercadoLibreConfigured ? 'CONNECTED' : 'NO CONFIGURADO'}',
+                        ),
+                        Text('Busqueda global: NO HABILITADA POR ML'),
+                        Text(
+                          'Sellers conectados: ${_settings['mercadolibre_partner_sellers_count'] ?? 0}',
+                        ),
+                        const SizedBox(height: 12),
                         Wrap(
                           spacing: 12,
                           runSpacing: 12,
@@ -3120,6 +3825,11 @@ class _LandfinderHomeState extends State<LandfinderHome> {
                               label: 'Client secret',
                               icon: Icons.key_outlined,
                               obscure: true,
+                            ),
+                            _InputBox(
+                              controller: _mercadoLibrePartnerSellersController,
+                              label: 'Seller IDs',
+                              icon: Icons.storefront_outlined,
                             ),
                           ],
                         ),
@@ -3143,8 +3853,18 @@ class _LandfinderHomeState extends State<LandfinderHome> {
                               label: Text(
                                 _connectingMercadoLibre
                                     ? 'Conectando'
-                                    : 'Conectar',
+                                    : 'Conectar Mercado Libre',
                               ),
+                            ),
+                            OutlinedButton.icon(
+                              onPressed: _savingSettings
+                                  ? null
+                                  : () => _saveSourceSecret(
+                                      mercadoLibrePartnerSellerIdsKey,
+                                      _mercadoLibrePartnerSellersController,
+                                    ),
+                              icon: const Icon(Icons.save_outlined),
+                              label: const Text('Guardar sellers'),
                             ),
                             OutlinedButton.icon(
                               onPressed:
@@ -3403,11 +4123,12 @@ bool _hasValidPropertyLocation(Map<String, dynamic> property) {
   }
   final precision = property['location_precision']?.toString() ?? 'UNKNOWN';
   return {
+    'PARCEL_POLYGON',
+    'EXACT_COORDINATES',
+    'VERIFIED_ADDRESS',
+    'STREET_ADDRESS',
     'EXACT',
-    'APPROXIMATE',
-    'CENTROID',
     'APPROXIMATE_PROPERTY',
-    'PROPERTY_COMMUNE_CENTROID',
   }.contains(precision);
 }
 
@@ -3488,6 +4209,20 @@ String _riskStatusLabel(dynamic value) {
   };
 }
 
+String _adminStatusLabel(String value) {
+  return switch (value) {
+    'MATCH' => 'Coincide',
+    'COMMUNE_MISMATCH' => 'Comuna no coincide',
+    'REGION_MISMATCH' => 'Region no coincide',
+    'COMMUNE_AND_REGION_MISMATCH' => 'Comuna y region no coinciden',
+    'OUTSIDE_CHILE' => 'Fuera de Chile',
+    'GEOMETRY_INVALID' => 'Geometria invalida',
+    'GEOMETRY_UNKNOWN' => 'Geometria no verificada',
+    'SOURCE_ADMIN_UNKNOWN' => 'Fuente sin comuna/region',
+    _ => value,
+  };
+}
+
 String _dimensionsText(Map<String, dynamic> metrics) {
   final width = _asDouble(metrics['estimated_width_m']);
   final depth = _asDouble(metrics['estimated_depth_m']);
@@ -3555,6 +4290,34 @@ String? _sourceUrl(Map<String, dynamic> evidence) {
     return url;
   }
   return null;
+}
+
+class _MercadoLibreImportSummary extends StatelessWidget {
+  const _MercadoLibreImportSummary({required this.preview});
+
+  final Map<String, dynamic> preview;
+
+  @override
+  Widget build(BuildContext context) {
+    final chips = [
+      ('Entradas pegadas', preview['entries']),
+      ('IDs detectados', preview['ids_detected']),
+      ('Duplicados', preview['duplicates']),
+      ('Nuevos sellers', preview['new_sellers']),
+      if (preview.containsKey('new')) ('Nuevos', preview['new']),
+      if (preview.containsKey('updated')) ('Actualizados', preview['updated']),
+      if (preview.containsKey('discarded'))
+        ('Descartados', preview['discarded']),
+    ];
+    return Wrap(
+      spacing: 8,
+      runSpacing: 8,
+      children: [
+        for (final item in chips)
+          Chip(label: Text('${item.$1}: ${item.$2 ?? 0}')),
+      ],
+    );
+  }
 }
 
 String _credentialStatusLabel(String status) {

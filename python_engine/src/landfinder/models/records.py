@@ -75,6 +75,14 @@ class NormalizedPropertyRecord(BaseModel):
     location_precision: str = "UNKNOWN"
     location_source: str | None = None
     location_method: str | None = None
+    geometry_status: str = "UNKNOWN"
+    geometry_source: str | None = None
+    geometry_type: str = "UNKNOWN"
+    parcel_geometry: dict[str, Any] | None = None
+    geometry_area_m2: float | None = None
+    geometry_perimeter_m: float | None = None
+    official_area_m2: float | None = None
+    area_difference_percent: float | None = None
     geocoded_at: datetime | None = None
     geocoding_source: str | None = None
     geocoding_confidence: float = Field(default=0, ge=0, le=1)

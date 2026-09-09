@@ -420,19 +420,19 @@ async def test_pipeline_persists_source_record_classifier_audit(tmp_path) -> Non
             "source": "mercado_publico",
             "source_type": SourceType.PUBLIC_PROCUREMENT.value,
             "external_id": "accepted-1",
-            "title": "Compra terreno",
-            "automatic_classification": "LAND_ACQUISITION",
+            "title": "Venta terreno municipal",
+            "automatic_classification": "LAND_SALE_PROCESS",
             "automatic_confidence": 0.91,
             "automatic_score": 110,
-            "positive_terms": ["compra", "terreno"],
-            "rules_triggered": ["TITLE_LAND_ACQUISITION"],
+            "positive_terms": ["venta", "terreno"],
+            "rules_triggered": ["TITLE_LAND_SALE_PROCESS"],
         },
         {
             "source": "mercado_publico",
             "source_type": SourceType.PUBLIC_PROCUREMENT.value,
             "external_id": "possible-1",
             "title": "Servicio SERVIU inmueble",
-            "automatic_classification": "POSSIBLE_LAND",
+            "automatic_classification": "LAND_DEMAND",
             "automatic_confidence": 0.55,
             "automatic_score": 20,
             "positive_terms": ["inmueble"],
@@ -479,12 +479,12 @@ async def test_pipeline_persists_source_record_classifier_audit(tmp_path) -> Non
     distribution = source_records.distribution("job-classifier-audit")
     assert result["source_records_received"] == 3
     assert result["accepted_candidates"] == 1
-    assert result["possible_candidates"] == 1
+    assert distribution["demand"] == 1
     assert result["rejected_records"] == 1
     assert distribution["distribution"] == {
         "FALSE_POSITIVE": 1,
-        "LAND_ACQUISITION": 1,
-        "POSSIBLE_LAND": 1,
+        "LAND_DEMAND": 1,
+        "LAND_SALE_PROCESS": 1,
     }
     assert source_records.list(job_id="job-classifier-audit", bucket="accepted")[0][
         "property_id"

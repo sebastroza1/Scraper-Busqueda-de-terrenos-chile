@@ -8,6 +8,7 @@ const cmfApiKeyKey = 'CMF_API_KEY';
 const mercadoLibreClientIdKey = 'MERCADOLIBRE_CLIENT_ID';
 const mercadoLibreClientSecretKey = 'MERCADOLIBRE_CLIENT_SECRET';
 const mercadoLibreRedirectUriKey = 'MERCADOLIBRE_REDIRECT_URI';
+const mercadoLibrePartnerSellerIdsKey = 'MERCADOLIBRE_PARTNER_SELLER_IDS';
 const mercadoLibreAccessTokenKey = 'MERCADOLIBRE_ACCESS_TOKEN';
 const mercadoLibreRefreshTokenKey = 'MERCADOLIBRE_REFRESH_TOKEN';
 const mercadoLibreAccessTokenExpiresAtKey =
@@ -19,6 +20,7 @@ const supportedSecretKeys = [
   mercadoLibreClientIdKey,
   mercadoLibreClientSecretKey,
   mercadoLibreRedirectUriKey,
+  mercadoLibrePartnerSellerIdsKey,
   mercadoLibreAccessTokenKey,
   mercadoLibreRefreshTokenKey,
   mercadoLibreAccessTokenExpiresAtKey,

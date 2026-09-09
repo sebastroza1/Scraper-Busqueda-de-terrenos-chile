@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from pathlib import Path
 
 from landfinder.storage.database import SCHEMA_PATH
 
-CURRENT_SCHEMA_VERSION = 7
+CURRENT_SCHEMA_VERSION = 9
 
 
 def migrate_database(database_path: str | Path) -> None:
@@ -51,6 +52,14 @@ def migrate_database(database_path: str | Path) -> None:
         if 7 not in applied:
             _apply_v7(connection)
             connection.execute("INSERT OR IGNORE INTO schema_migrations(version) VALUES (7)")
+
+        if 8 not in applied:
+            _apply_v8(connection)
+            connection.execute("INSERT OR IGNORE INTO schema_migrations(version) VALUES (8)")
+
+        if 9 not in applied:
+            _apply_v9(connection)
+            connection.execute("INSERT OR IGNORE INTO schema_migrations(version) VALUES (9)")
 
 
 def _apply_v2(connection: sqlite3.Connection) -> None:
@@ -397,6 +406,173 @@ def _apply_v7(connection: sqlite3.Connection) -> None:
         """
     )
     _redact_historical_scraping_errors(connection)
+
+
+def _apply_v8(connection: sqlite3.Connection) -> None:
+    _invalidate_suspicious_geocodes(connection)
+    _reclassify_known_procurement_regressions(connection)
+
+
+def _apply_v9(connection: sqlite3.Connection) -> None:
+    property_columns = {
+        "source_epsg": "INTEGER",
+        "normalized_epsg": "INTEGER NOT NULL DEFAULT 4326",
+        "source_region": "TEXT",
+        "source_commune": "TEXT",
+        "calculated_region": "TEXT",
+        "calculated_commune": "TEXT",
+        "admin_validation_status": "TEXT NOT NULL DEFAULT 'GEOMETRY_UNKNOWN'",
+        "admin_validation_confidence": "REAL NOT NULL DEFAULT 0",
+        "admin_validation_reason": "TEXT",
+    }
+    for column, definition in property_columns.items():
+        _add_column_if_missing(connection, "property_candidates", column, definition)
+
+
+def _invalidate_suspicious_geocodes(connection: sqlite3.Connection) -> None:
+    rows = connection.execute(
+        """
+        SELECT latitude, longitude, COUNT(*) AS total
+        FROM property_candidates
+        WHERE latitude IS NOT NULL
+          AND longitude IS NOT NULL
+          AND LOWER(COALESCE(geocoding_source, location_source, '')) = 'nominatim'
+          AND UPPER(COALESCE(location_precision, 'UNKNOWN')) NOT IN (
+            'PARCEL_POLYGON',
+            'EXACT_COORDINATES',
+            'VERIFIED_ADDRESS',
+            'STREET_ADDRESS',
+            'EXACT',
+            'APPROXIMATE_PROPERTY'
+          )
+        GROUP BY latitude, longitude
+        HAVING COUNT(*) > 1
+        """
+    ).fetchall()
+    suspicious_points = {(row[0], row[1]) for row in rows}
+    if not suspicious_points:
+        return
+    now = "CURRENT_TIMESTAMP"
+    for latitude, longitude in suspicious_points:
+        candidates = connection.execute(
+            """
+            SELECT internal_id, anomaly_flags_json
+            FROM property_candidates
+            WHERE latitude = ?
+              AND longitude = ?
+              AND LOWER(COALESCE(geocoding_source, location_source, '')) = 'nominatim'
+            """,
+            (latitude, longitude),
+        ).fetchall()
+        for internal_id, flags_json in candidates:
+            flags = _append_flags(
+                flags_json,
+                [
+                    "INVALID_LOCATION",
+                    "SUSPICIOUS_GEOCODE",
+                    "TERRITORIAL_ANALYSIS_STALE",
+                ],
+            )
+            connection.execute(
+                f"""
+                UPDATE property_candidates
+                SET latitude = NULL,
+                    longitude = NULL,
+                    location_source = 'INVALID_LOCATION',
+                    location_method = 'invalidated_geocode',
+                    location_precision = 'UNKNOWN',
+                    geocoding_source = 'INVALID_LOCATION',
+                    geocoding_confidence = 0,
+                    territorial_status = 'SIN_INFORMACION_SUFICIENTE',
+                    anomaly_flags_json = ?,
+                    manual_notes = COALESCE(manual_notes || '\n', '') ||
+                      'INVALID_LOCATION_SOURCE: duplicated approximate Nominatim point.',
+                    updated_at = {now}
+                WHERE internal_id = ?
+                """,
+                (json.dumps(flags, ensure_ascii=True), internal_id),
+            )
+            connection.execute(
+                f"""
+                INSERT INTO property_location_history (
+                  internal_id, latitude, longitude, location_source, location_method,
+                  location_precision, location_confidence, raw_result_json,
+                  assigned_by, created_at
+                )
+                VALUES (?, NULL, NULL, 'INVALID_LOCATION', 'invalidated_geocode',
+                        'UNKNOWN', 0, ?, 'migration_v8', {now})
+                """,
+                (
+                    internal_id,
+                    json.dumps(
+                        {
+                            "reason": "SUSPICIOUS_GEOCODE",
+                            "previous_latitude": latitude,
+                            "previous_longitude": longitude,
+                        },
+                        ensure_ascii=True,
+                    ),
+                ),
+            )
+
+
+def _reclassify_known_procurement_regressions(connection: sqlite3.Connection) -> None:
+    known = {
+        "2427-87-LE26": ("GOODS_FOR_PROPERTY", "GOODS_FOR_PROPERTY_CONTEXT"),
+        "2450-90-LE26": ("GOODS_FOR_PROPERTY", "GOODS_FOR_PROPERTY_CONTEXT"),
+        "4328-33-B226": ("LAND_DEMAND", "PUBLIC_BUYER_LAND_DEMAND"),
+        "2794-22-LR26": ("LAND_DEMAND", "PUBLIC_BUYER_LAND_DEMAND"),
+        "5358-9-LR26": ("LAND_DEMAND", "PUBLIC_BUYER_LAND_DEMAND"),
+        "4295-54-LR26": ("LAND_SALE_PROCESS", "LAND_SALE_PROCESS"),
+    }
+    for external_id, (classification, rule) in known.items():
+        connection.execute(
+            """
+            UPDATE source_records
+            SET automatic_classification = ?,
+                rules_triggered_json = ?,
+                classification_reason = ?,
+                property_id = CASE
+                  WHEN ? IN ('LAND_DEMAND', 'PROPERTY_DEMAND', 'GOODS_FOR_PROPERTY')
+                  THEN NULL
+                  ELSE property_id
+                END,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE external_id = ?
+            """,
+            (
+                classification,
+                json.dumps([rule], ensure_ascii=True),
+                f"migration_v8={classification}; rule={rule}",
+                classification,
+                external_id,
+            ),
+        )
+        if classification in {"LAND_DEMAND", "PROPERTY_DEMAND", "GOODS_FOR_PROPERTY"}:
+            connection.execute(
+                """
+                UPDATE property_candidates
+                SET candidate_status = 'SOURCE_RECORD_ONLY',
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE source = 'mercado_publico'
+                  AND external_id = ?
+                """,
+                (external_id,),
+            )
+
+
+def _append_flags(flags_json: object, new_flags: list[str]) -> list[str]:
+    try:
+        flags = json.loads(str(flags_json or "[]"))
+    except json.JSONDecodeError:
+        flags = []
+    if not isinstance(flags, list):
+        flags = []
+    result = [str(item) for item in flags]
+    for flag in new_flags:
+        if flag not in result:
+            result.append(flag)
+    return result
 
 
 def _redact_historical_scraping_errors(connection: sqlite3.Connection) -> None:

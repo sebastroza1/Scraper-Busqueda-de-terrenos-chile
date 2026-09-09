@@ -20,7 +20,7 @@ def test_classifies_land_acquisition() -> None:
 
     assert (
         classify_public_procurement_land_tender(item)
-        == PublicProcurementLandClassification.LAND_ACQUISITION
+        == PublicProcurementLandClassification.LAND_DEMAND
     )
 
 
@@ -34,11 +34,11 @@ def test_explainable_classifier_returns_terms_rules_and_manual_review_hint() -> 
 
     assert (
         decision.classification.value
-        == PublicProcurementLandClassification.LAND_ACQUISITION.value
+        == PublicProcurementLandClassification.LAND_DEMAND.value
     )
     assert decision.confidence >= 0.8
     assert {"compra", "terreno"}.issubset(set(decision.positive_terms))
-    assert "TITLE_LAND_ACQUISITION" in decision.rules_triggered
+    assert "PUBLIC_BUYER_LAND_DEMAND" in decision.rules_triggered
     assert decision.requires_manual_review is False
 
 
@@ -57,7 +57,7 @@ def test_classifies_acquisition_title_over_sale_product_category() -> None:
 
     assert (
         classify_public_procurement_land_tender(item)
-        == PublicProcurementLandClassification.LAND_ACQUISITION
+        == PublicProcurementLandClassification.LAND_DEMAND
     )
 
 
@@ -68,7 +68,7 @@ def test_classifies_mojibake_acquisition_title() -> None:
 
     assert (
         classify_public_procurement_land_tender(item)
-        == PublicProcurementLandClassification.LAND_ACQUISITION
+        == PublicProcurementLandClassification.LAND_DEMAND
     )
 
 
@@ -77,7 +77,7 @@ def test_classifies_land_sale() -> None:
 
     assert (
         classify_public_procurement_land_tender(item)
-        == PublicProcurementLandClassification.LAND_SALE
+        == PublicProcurementLandClassification.LAND_SALE_PROCESS
     )
 
 
@@ -101,7 +101,7 @@ def test_classifies_municipal_land_sale_with_legal_acquisition_text_as_sale() ->
 
     assert (
         classify_public_procurement_land_tender(item)
-        == PublicProcurementLandClassification.LAND_SALE
+        == PublicProcurementLandClassification.LAND_SALE_PROCESS
     )
 
 
@@ -122,7 +122,7 @@ def test_classifies_civil_works_with_weak_lote_term_as_false_positive() -> None:
 
     assert (
         classify_public_procurement_land_tender(item)
-        == PublicProcurementLandClassification.FALSE_POSITIVE
+        == PublicProcurementLandClassification.WORKS_ON_EXISTING_PROPERTY
     )
 
 
@@ -145,7 +145,7 @@ def test_classifies_forest_service_lote_toponym_as_false_positive() -> None:
 
     assert (
         classify_public_procurement_land_tender(item)
-        == PublicProcurementLandClassification.FALSE_POSITIVE
+        == PublicProcurementLandClassification.LAND_RELATED_SERVICE
     )
 
 
@@ -157,7 +157,7 @@ def test_classifies_false_positive_soil_study() -> None:
 
     assert (
         classify_public_procurement_land_tender(item)
-        == PublicProcurementLandClassification.FALSE_POSITIVE
+        == PublicProcurementLandClassification.VALUATION_OR_STUDY
     )
 
 
@@ -180,7 +180,7 @@ def test_classifies_cubre_suelos_as_false_positive() -> None:
 
     assert (
         classify_public_procurement_land_tender(item)
-        == PublicProcurementLandClassification.FALSE_POSITIVE
+        == PublicProcurementLandClassification.GOODS_FOR_PROPERTY
     )
 
 
@@ -192,7 +192,7 @@ def test_classifies_maintenance_articles_for_buildings_as_false_positive() -> No
 
     assert (
         classify_public_procurement_land_tender(item)
-        == PublicProcurementLandClassification.FALSE_POSITIVE
+        == PublicProcurementLandClassification.GOODS_FOR_PROPERTY
     )
 
 
@@ -211,19 +211,19 @@ def test_classifies_site_web_as_false_positive() -> None:
 def test_classifies_sitio_eriazo_with_area_as_possible_land() -> None:
     item = {"Nombre": "Sitio eriazo 10.000 m2 disponible"}
 
-    assert classify_public_procurement_land_tender(item) in {
-        PublicProcurementLandClassification.REAL_ESTATE,
-        PublicProcurementLandClassification.POSSIBLE_LAND,
-    }
+    assert (
+        classify_public_procurement_land_tender(item)
+        == PublicProcurementLandClassification.UNKNOWN
+    )
 
 
 def test_classifies_peladero_en_venta_as_possible_not_confirmed_sale() -> None:
     item = {"Nombre": "Peladero urbano en venta"}
 
-    assert classify_public_procurement_land_tender(item) in {
-        PublicProcurementLandClassification.REAL_ESTATE,
-        PublicProcurementLandClassification.POSSIBLE_LAND,
-    }
+    assert (
+        classify_public_procurement_land_tender(item)
+        == PublicProcurementLandClassification.UNKNOWN
+    )
 
 
 def test_classifies_real_sale_phrase() -> None:
@@ -231,7 +231,7 @@ def test_classifies_real_sale_phrase() -> None:
 
     assert (
         classify_public_procurement_land_tender(item)
-        == PublicProcurementLandClassification.LAND_SALE
+        == PublicProcurementLandClassification.LAND_SALE_PROCESS
     )
 
 
@@ -250,7 +250,7 @@ def test_mercado_publico_transform_keeps_buyer_location_separate() -> None:
         },
         "Fechas": {"FechaPublicacion": "30-08-2026", "FechaCierre": "12-09-2026"},
         "landfinder": {
-            "procurement_classification": "LAND_ACQUISITION",
+            "procurement_classification": "LAND_DEMAND",
             "original_text": "Compra terreno SERVIU",
         },
     }
@@ -270,7 +270,7 @@ def test_mercado_publico_transform_keeps_buyer_location_separate() -> None:
     assert raw.raw_payload["landfinder"]["organization_address"] == "Av. Ejemplo 123"
     assert raw.raw_payload["landfinder"]["property_commune"] is None
     assert raw.raw_payload["landfinder"]["property_address"] is None
-    assert raw.raw_payload["landfinder"]["procurement_classification"] == "LAND_ACQUISITION"
+    assert raw.raw_payload["landfinder"]["procurement_classification"] == "LAND_DEMAND"
 
 
 def test_mercado_publico_transform_ignores_code_like_tiny_amount_and_extracts_area() -> None:
@@ -311,6 +311,45 @@ def test_mercado_publico_transform_extracts_hectares_but_not_units() -> None:
     raw = mercado_publico_tender_to_raw(item)
 
     assert raw.area_raw == "1,2 ha"
+
+
+def test_regression_real_container_tender_is_not_land_demand() -> None:
+    item = {
+        "CodigoExterno": "2427-87-LE26",
+        "Nombre": (
+            "ADQUISICION DE CONTENEDORES CUARTEL DE ASEO LUCUMO "
+            "INMUEBLE EX TEATRO PACIFICO DAT."
+        ),
+    }
+
+    assert (
+        classify_public_procurement_land_tender(item)
+        == PublicProcurementLandClassification.GOODS_FOR_PROPERTY
+    )
+
+
+def test_regression_real_land_purchase_tenders_are_public_demand() -> None:
+    for code, name in [
+        ("4328-33-B226", "ADQUISICION TERRENO TIUQUILEMU"),
+        ("2794-22-LR26", "Adquisicion de Terreno para Medio Ambiente L.A."),
+        ("5358-9-LR26", "ADQUISICION DE TERRENO PARA PROYECTO EDUCACIONAL U"),
+    ]:
+        assert classify_public_procurement_land_tender(
+            {"CodigoExterno": code, "Nombre": name}
+        ) == PublicProcurementLandClassification.LAND_DEMAND
+
+
+def test_regression_lawn_area_does_not_become_parcel_surface() -> None:
+    item = {
+        "CodigoExterno": "2450-90-LE26",
+        "Nombre": "Adquisicion de cubre suelos Tiki Tiki y sistema de riego",
+        "Descripcion": "Recuperacion de espacio publico con cesped en 1.200 m2.",
+    }
+
+    raw = mercado_publico_tender_to_raw(item)
+
+    assert raw.area_raw is None
+    assert raw.raw_payload["landfinder"]["surface_context"] == "LAWN_AREA"
 
 
 def test_mercado_publico_keyword_matching_uses_word_boundaries_and_modes() -> None:

@@ -41,11 +41,11 @@ def test_api_exposes_source_record_classifier_audit(tmp_path) -> None:
             "source_type": SourceType.PUBLIC_PROCUREMENT.value,
             "external_id": "1234-1-LQ26",
             "title": "Compra terreno",
-            "automatic_classification": "LAND_ACQUISITION",
+            "automatic_classification": "LAND_DEMAND",
             "automatic_confidence": 0.91,
             "automatic_score": 110,
             "positive_terms": ["compra", "terreno"],
-            "rules_triggered": ["TITLE_LAND_ACQUISITION"],
+            "rules_triggered": ["PUBLIC_BUYER_LAND_DEMAND"],
             "raw_payload": {"Nombre": "Compra terreno"},
         },
     )
@@ -59,7 +59,8 @@ def test_api_exposes_source_record_classifier_audit(tmp_path) -> None:
 
     diagnostics = client.get("/searches/job-api/classifier-diagnostics", headers=headers)
     assert diagnostics.status_code == 200
-    assert diagnostics.json()["classifier_distribution"]["accepted"] == 1
+    assert diagnostics.json()["classifier_distribution"]["accepted"] == 0
+    assert diagnostics.json()["classifier_distribution"]["demand"] == 1
 
     detail = client.get(f"/source-records/{source_record_id}", headers=headers)
     assert detail.status_code == 200
@@ -95,12 +96,24 @@ def test_api_exposes_chile_catalog_and_keyword_presets(tmp_path) -> None:
         "Santiago",
     }
     assert {item["region_code"] for item in communes.json()["items"]} == {"CL-RM"}
+    assert {item["region_id"] for item in communes.json()["items"]} == {"CL-RM"}
+    assert all("commune_id" in item and "commune_name" in item for item in communes.json()["items"])
+
+    atacama = client.get("/catalog/regions/CL-AT/communes", headers=headers)
+    assert atacama.status_code == 200
+    atacama_items = atacama.json()["items"]
+    assert {item["region_id"] for item in atacama_items} == {"CL-AT"}
+    assert {item["commune_name"] for item in atacama_items} >= {"Chanaral", "Copiapo"}
+    assert "Los Andes" not in {item["commune_name"] for item in atacama_items}
 
     all_communes = client.get("/catalog/regions/ALL/communes", headers=headers)
     assert all_communes.status_code == 200
     all_commune_items = all_communes.json()["items"]
     assert len(all_commune_items) > len(communes.json()["items"])
     assert {item["region_code"] for item in all_commune_items} >= {"CL-RM", "CL-TA"}
+    chanaral = next(item for item in all_commune_items if item["commune_name"] == "Chanaral")
+    assert chanaral["region_id"] == "CL-AT"
+    assert chanaral["region_name"] == "Atacama"
 
     presets = client.get("/catalog/search-keyword-presets", headers=headers)
     assert presets.status_code == 200

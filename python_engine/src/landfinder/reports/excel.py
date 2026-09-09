@@ -139,6 +139,22 @@ def export_properties_excel(database_path: str | Path, output_path: str | Path) 
         _group_by(provenance, "property_id"),
         _group_by(source_audit, "property_id"),
     )
+    _write_properties(
+        workbook.create_sheet("TERRENOS_DISPONIBLES"),
+        properties,
+        images,
+        _group_by(sources, "internal_id"),
+        _group_by(provenance, "property_id"),
+        _group_by(source_audit, "property_id"),
+    )
+    _write_source_records(
+        workbook.create_sheet("DEMANDA_PUBLICA"),
+        [row for row in source_audit if row.get("automatic_classification") in _demand_classes()],
+    )
+    _write_source_records(
+        workbook.create_sheet("OTRAS_OPORTUNIDADES"),
+        [row for row in source_audit if row.get("automatic_classification") in _other_classes()],
+    )
     _write_used_sources(workbook.create_sheet("Fuentes_Utilizadas"), source_run_status)
     _write_table(workbook.create_sheet("Fuentes"), sources)
     _write_table(workbook.create_sheet("Historial_Precios"), price_history)
@@ -773,6 +789,7 @@ def _group_by(rows: list[dict[str, Any]], key: str) -> dict[str, list[dict[str, 
 
 def _source_label(source_id: Any) -> str:
     return {
+        "bienes_nacionales": "Bienes Nacionales",
         "mercado_publico": "Mercado Publico",
         "mercadolibre_real_estate": "MercadoLibre",
         "cmf_uf": "CMF",
@@ -782,11 +799,27 @@ def _source_label(source_id: Any) -> str:
 
 def _source_usage(source_id: Any) -> str:
     return {
+        "bienes_nacionales": "Activos fiscales",
         "mercado_publico": "Descubrimiento",
         "mercadolibre_real_estate": "Publicaciones",
         "cmf_uf": "Conversion UF",
         "minvu": "Territorial",
     }.get(str(source_id), "")
+
+
+def _demand_classes() -> set[str]:
+    return {"LAND_DEMAND", "PROPERTY_DEMAND"}
+
+
+def _other_classes() -> set[str]:
+    return {
+        "FALSE_POSITIVE",
+        "GOODS_FOR_PROPERTY",
+        "WORKS_ON_EXISTING_PROPERTY",
+        "LAND_RELATED_SERVICE",
+        "VALUATION_OR_STUDY",
+        "UNKNOWN",
+    }
 
 
 def _yes_no(value: Any) -> str:

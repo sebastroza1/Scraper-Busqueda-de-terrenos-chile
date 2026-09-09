@@ -86,7 +86,10 @@ async def diagnose_mercadolibre(settings: Settings) -> CredentialDiagnostic:
         message = (
             "Access token no configurado; existe refresh token y se requiere renovacion."
             if settings.mercadolibre_refresh_token
-            else "OAuth MercadoLibre no configurado."
+            else (
+                "OAuth MercadoLibre no configurado: falta MERCADOLIBRE_ACCESS_TOKEN "
+                "o MERCADOLIBRE_REFRESH_TOKEN con MERCADOLIBRE_CLIENT_ID."
+            )
         )
         return _diagnostic(source_id, status, message)
     if settings.mercadolibre_access_token_expires_at:

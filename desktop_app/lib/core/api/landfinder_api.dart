@@ -46,6 +46,11 @@ abstract class LandfinderApi {
     String propertyId, {
     bool forceRefresh = false,
   });
+  Future<Map<String, dynamic>> discoverSoil(Map<String, dynamic> filters);
+  Future<Map<String, dynamic>> evaluatePropertyTerritory(
+    String propertyId, {
+    bool forceRefresh = false,
+  });
   Future<Map<String, dynamic>> minvuServices();
   Future<Map<String, dynamic>> minvuIptCatalog({String? region});
   Future<Map<String, dynamic>> minvuLayerAudit({
@@ -63,6 +68,12 @@ abstract class LandfinderApi {
     required String redirectUri,
     String? clientSecret,
   });
+  Future<Map<String, dynamic>> analyzeMercadoLibreImport(String inputText);
+  Future<Map<String, dynamic>> importMercadoLibreItems(
+    String inputText,
+    List<String> includeTypes,
+  );
+  Future<Map<String, dynamic>> mercadoLibreImportHistory();
   Future<bool> refreshMercadoLibreIfNeeded();
   List<String> logs();
   void dispose();
@@ -327,6 +338,25 @@ class LocalLandfinderApi implements LandfinderApi {
   }
 
   @override
+  Future<Map<String, dynamic>> discoverSoil(Map<String, dynamic> filters) async {
+    return _map(await _request('POST', '/soil/discover', body: filters));
+  }
+
+  @override
+  Future<Map<String, dynamic>> evaluatePropertyTerritory(
+    String propertyId, {
+    bool forceRefresh = false,
+  }) async {
+    return _map(
+      await _request(
+        'POST',
+        '/properties/$propertyId/territory/evaluate',
+        query: {'force_refresh': forceRefresh ? 'true' : 'false'},
+      ),
+    );
+  }
+
+  @override
   Future<Map<String, dynamic>> minvuServices() async {
     return _map(await _request('GET', '/gis/minvu/services'));
   }
@@ -419,13 +449,52 @@ class LocalLandfinderApi implements LandfinderApi {
         clientSecret.trim(),
       );
     }
-    final result = await _mercadoLibreOAuth.authorize(
-      clientId: clientId.trim(),
-      clientSecret: clientSecret?.trim(),
-      redirectUri: redirectUri.trim(),
-    );
     await _pushSecretsToRunningBackend();
-    return result.toJson();
+    final result = _map(await _request('GET', '/oauth/mercadolibre/authorize'));
+    final authorizationUrl = result['authorization_url']?.toString();
+    if (authorizationUrl == null || authorizationUrl.isEmpty) {
+      throw StateError(
+        'El backend no entrego URL de autorizacion Mercado Libre.',
+      );
+    }
+    await _openExternalBrowser(authorizationUrl);
+    return result;
+  }
+
+  @override
+  Future<Map<String, dynamic>> analyzeMercadoLibreImport(
+    String inputText,
+  ) async {
+    await refreshMercadoLibreIfNeeded();
+    await _pushSecretsToRunningBackend();
+    return _map(
+      await _request(
+        'POST',
+        '/mercadolibre/import/analyze',
+        body: {'input_text': inputText},
+      ),
+    );
+  }
+
+  @override
+  Future<Map<String, dynamic>> importMercadoLibreItems(
+    String inputText,
+    List<String> includeTypes,
+  ) async {
+    await refreshMercadoLibreIfNeeded();
+    await _pushSecretsToRunningBackend();
+    return _map(
+      await _request(
+        'POST',
+        '/mercadolibre/import',
+        body: {'input_text': inputText, 'include_types': includeTypes},
+      ),
+    );
+  }
+
+  @override
+  Future<Map<String, dynamic>> mercadoLibreImportHistory() async {
+    return _map(await _request('GET', '/mercadolibre/import/history'));
   }
 
   @override
@@ -603,6 +672,11 @@ class LocalLandfinderApi implements LandfinderApi {
     final secrets = await _backendSecretEnvironment();
     final payload = <String, dynamic>{
       'mercado_publico_ticket': secrets[mercadoPublicoTicketKey],
+      'mercadolibre_client_id': secrets[mercadoLibreClientIdKey],
+      'mercadolibre_client_secret': secrets[mercadoLibreClientSecretKey],
+      'mercadolibre_redirect_uri': secrets[mercadoLibreRedirectUriKey],
+      'mercadolibre_partner_seller_ids':
+          secrets[mercadoLibrePartnerSellerIdsKey],
       'mercadolibre_access_token': secrets[mercadoLibreAccessTokenKey],
       'mercadolibre_refresh_token': secrets[mercadoLibreRefreshTokenKey],
       'mercadolibre_access_token_expires_at':
@@ -665,6 +739,18 @@ class LocalLandfinderApi implements LandfinderApi {
     if (_logs.length > 200) {
       _logs.removeAt(0);
     }
+  }
+
+  Future<void> _openExternalBrowser(String url) async {
+    if (Platform.isWindows) {
+      await Process.run('rundll32.exe', ['url.dll,FileProtocolHandler', url]);
+      return;
+    }
+    if (Platform.isMacOS) {
+      await Process.run('open', [url]);
+      return;
+    }
+    await Process.run('xdg-open', [url]);
   }
 
   String _join(String a, String b, [String? c, String? d, String? e]) {

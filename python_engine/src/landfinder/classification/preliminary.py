@@ -101,7 +101,14 @@ def _location_criterion(property_record: dict[str, Any], checked_at: str) -> dic
         result = CriterionResult.PENDING
         observation = "No hay coordenadas para ubicar el terreno."
         confidence = 0.0
-    elif precision in {"EXACT", "APPROXIMATE_PROPERTY"}:
+    elif precision in {
+        "PARCEL_POLYGON",
+        "EXACT_COORDINATES",
+        "VERIFIED_ADDRESS",
+        "STREET_ADDRESS",
+        "EXACT",
+        "APPROXIMATE_PROPERTY",
+    }:
         result = CriterionResult.PASSES
         observation = "Coordenadas disponibles; precision debe leerse junto al metodo."
         confidence = float(property_record.get("geocoding_confidence") or 0.7)
@@ -147,8 +154,11 @@ def _urban_limit_criterion(urban_limit: dict[str, Any] | None, checked_at: str) 
         result = CriterionResult.PASSES
         observation = "El punto/geometria intersecta una capa de limite urbano."
     elif status == "NO":
-        result = CriterionResult.FAILS
-        observation = "No se detecto interseccion con las capas de limite urbano consultadas."
+        result = CriterionResult.NOT_VERIFIED
+        observation = (
+            "Sin interseccion detectada; requiere confirmar cobertura de capa y precision "
+            "de ubicacion antes de concluir fuera de limite urbano."
+        )
     else:
         result = CriterionResult.NOT_VERIFIED
         observation = "No hay respuesta verificable de limite urbano."
@@ -200,8 +210,11 @@ def _risk_criterion(risk: dict[str, Any] | None, checked_at: str) -> dict[str, A
         result = CriterionResult.FAILS
         observation = "Se detecto interseccion con al menos una capa de riesgo."
     elif status == "NO_INTERSECTION_DETECTED":
-        result = CriterionResult.PASSES
-        observation = "No se detecto interseccion con las capas de riesgo consultadas."
+        result = CriterionResult.NOT_VERIFIED
+        observation = (
+            "Sin interseccion detectada; requiere confirmar cobertura de capa, consulta "
+            "exitosa y precision de ubicacion antes de tratarlo como despejado."
+        )
     else:
         result = CriterionResult.NOT_VERIFIED
         observation = "Riesgo no verificado."

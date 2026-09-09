@@ -2,6 +2,7 @@ from datetime import timedelta
 
 import pytest
 
+from landfinder.geospatial.admin_validator import AdministrativeValidationResult
 from landfinder.geospatial.geometry import calculate_parcel_metrics, local_metric_epsg
 from landfinder.geospatial.ipt_catalog import MinvuIptCatalog
 from landfinder.geospatial.minvu import ArcGisLayerConfig, arcgis_geometry_from_geojson
@@ -189,11 +190,57 @@ async def test_minvu_ipt_catalog_only_returns_zone_from_intersected_attributes(t
     assert result["zone_field"] == "ZONA"
 
 
+@pytest.mark.asyncio
+async def test_territorial_analyzer_skips_minvu_when_admin_validation_blocks(tmp_path) -> None:
+    database = Database(tmp_path / "territorial-blocked.sqlite")
+    property_id = PropertyRepository(database).upsert(
+        NormalizedPropertyRecord(
+            source_id="manual",
+            source_type=SourceType.MANUAL,
+            external_id="manual-blocked",
+            title="Propiedad con conflicto administrativo",
+            region="Atacama",
+            commune="Chanaral",
+            latitude=-22.47,
+            longitude=-68.89,
+            gross_area_m2=10000,
+        )
+    )
+    minvu = _FakeMinvu()
+    analyzer = TerritorialAnalyzer(database=database, minvu=minvu)
+    analyzer.admin_validator = _BlockingAdminValidator()
+
+    result = await analyzer.refresh_property(property_id)
+
+    assert result["property"]["territorial_status"] == "BLOCKED_LOCATION_CONFLICT"
+    assert result["warnings"] == ["ADMIN_LOCATION_CONFLICT"]
+    assert minvu.query_count == 0
+
+
+class _BlockingAdminValidator:
+    async def validate_property(self, property_record, *, force_refresh=False):  # noqa: ANN001, ARG002
+        return AdministrativeValidationResult(
+            source_region="Atacama",
+            source_commune="Chanaral",
+            calculated_region="Antofagasta",
+            calculated_commune="Calama",
+            admin_validation_status="COMMUNE_AND_REGION_MISMATCH",
+            admin_validation_confidence=0.9,
+            admin_validation_reason=(
+                "Source region and commune differ from administrative boundary."
+            ),
+            source_epsg=None,
+            normalized_epsg=4326,
+            validation_point={"latitude": -22.47, "longitude": -68.89},
+        )
+
+
 class _FakeMinvu:
     def __init__(self, prc_zone=None) -> None:  # noqa: ANN001
         self.root_url = "https://geoide.minvu.cl/server/rest/services"
         self.cache = None
         self.prc_zone = prc_zone
+        self.query_count = 0
 
     async def discover_services(self, folder="IPT"):  # noqa: ANN001
         return [{"name": "IPT/PRC_RM_Sur", "type": "MapServer"}]
@@ -221,6 +268,7 @@ class _FakeMinvu:
         return 42
 
     async def query_layer(self, layer, **kwargs):  # noqa: ANN001, ANN003
+        self.query_count += 1
         if "Limites_Urbanos" in layer.service_url:
             return {
                 "features": [

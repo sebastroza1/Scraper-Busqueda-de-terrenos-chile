@@ -34,10 +34,16 @@ DEFAULT_LAND_KEYWORDS = LAND_SEARCH_KEYWORDS
 
 
 class PublicProcurementLandClassification(StrEnum):
-    LAND_ACQUISITION = "LAND_ACQUISITION"
-    LAND_SALE = "LAND_SALE"
-    REAL_ESTATE = "REAL_ESTATE"
-    POSSIBLE_LAND = "POSSIBLE_LAND"
+    PROPERTY_FOR_SALE = "PROPERTY_FOR_SALE"
+    PROPERTY_FOR_LEASE = "PROPERTY_FOR_LEASE"
+    PROPERTY_FOR_CONCESSION = "PROPERTY_FOR_CONCESSION"
+    LAND_DEMAND = "LAND_DEMAND"
+    PROPERTY_DEMAND = "PROPERTY_DEMAND"
+    LAND_SALE_PROCESS = "LAND_SALE_PROCESS"
+    WORKS_ON_EXISTING_PROPERTY = "WORKS_ON_EXISTING_PROPERTY"
+    LAND_RELATED_SERVICE = "LAND_RELATED_SERVICE"
+    VALUATION_OR_STUDY = "VALUATION_OR_STUDY"
+    GOODS_FOR_PROPERTY = "GOODS_FOR_PROPERTY"
     FALSE_POSITIVE = "FALSE_POSITIVE"
     UNKNOWN = "UNKNOWN"
 
@@ -217,8 +223,10 @@ class MercadoPublicoConnector(SearchSource):
                     false_positives += 1
                     continue
                 if classification not in {
-                    PublicProcurementLandClassification.LAND_ACQUISITION,
-                    PublicProcurementLandClassification.LAND_SALE,
+                    PublicProcurementLandClassification.PROPERTY_FOR_SALE,
+                    PublicProcurementLandClassification.PROPERTY_FOR_LEASE,
+                    PublicProcurementLandClassification.PROPERTY_FOR_CONCESSION,
+                    PublicProcurementLandClassification.LAND_SALE_PROCESS,
                 }:
                     possible_records += 1
                     continue
@@ -392,7 +400,14 @@ def _should_fetch_detail(
     *,
     fetch_possible: bool,
 ) -> bool:
-    if decision.classification.value in {"LAND_ACQUISITION", "LAND_SALE"}:
+    if decision.classification.value in {
+        "PROPERTY_FOR_SALE",
+        "PROPERTY_FOR_LEASE",
+        "PROPERTY_FOR_CONCESSION",
+        "LAND_SALE_PROCESS",
+        "LAND_DEMAND",
+        "PROPERTY_DEMAND",
+    }:
         return True
     return fetch_possible and decision.classification.value != "FALSE_POSITIVE"
 

@@ -9,10 +9,10 @@ from typing import Any
 from landfinder.connectors.base import SearchQuery, SourceConnector, SourceUnavailableError
 from landfinder.core.uf import UFService, UFUnavailableError, calculate_price_fields
 from landfinder.deduplication.engine import DeduplicationEngine
+from landfinder.geocoding.resolver import GeolocationResolver
 from landfinder.geospatial.ipt_catalog import MinvuIptCatalog
 from landfinder.geospatial.minvu import MinvuArcGisConnector
 from landfinder.geospatial.territorial import TerritorialAnalyzer
-from landfinder.geocoding.resolver import GeolocationResolver
 from landfinder.images.processor import ImageProcessor
 from landfinder.models.enums import (
     JobStatus,
@@ -964,7 +964,14 @@ def _safe_message(value: Any) -> str:
 
 def _has_coordinates(property_record: dict[str, Any]) -> bool:
     precision = str(property_record.get("location_precision") or "UNKNOWN").upper()
-    if precision in {"ORGANIZATION_LOCATION_ONLY", "UNKNOWN"}:
+    if precision not in {
+        "PARCEL_POLYGON",
+        "EXACT_COORDINATES",
+        "VERIFIED_ADDRESS",
+        "STREET_ADDRESS",
+        "EXACT",
+        "APPROXIMATE_PROPERTY",
+    }:
         return False
     try:
         latitude = float(property_record.get("latitude"))

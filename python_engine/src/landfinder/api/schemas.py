@@ -31,12 +31,45 @@ class SettingsUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     mercado_publico_ticket: str | None = None
+    mercadolibre_client_id: str | None = None
+    mercadolibre_client_secret: str | None = None
+    mercadolibre_redirect_uri: str | None = None
+    mercadolibre_partner_seller_ids: str | None = None
+    mercadolibre_marketplace_global_enabled: bool | None = None
     mercadolibre_access_token: str | None = None
     mercadolibre_refresh_token: str | None = None
     mercadolibre_access_token_expires_at: str | None = None
     cmf_api_key: str | None = None
     reference_property_id: str | None = None
     map_provider: str | None = None
+
+
+class MercadoLibreImportAnalyzeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    input_text: str = Field(min_length=1)
+
+
+class MercadoLibreImportRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    input_text: str = Field(min_length=1)
+    include_types: list[str] = Field(
+        default_factory=lambda: ["VACANT_LAND", "LAND_WITH_STRUCTURE"]
+    )
+
+
+class SoilDiscoveryRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    region: str | None = None
+    commune: str | None = None
+    bbox: list[float] = Field(min_length=4, max_length=4)
+    surface_min_m2: float | None = Field(default=None, ge=0)
+    surface_max_m2: float | None = Field(default=None, ge=0)
+    limit: int = Field(default=100, ge=1, le=250)
+    offset: int = Field(default=0, ge=0)
+    only_inside_urban_limit: bool = False
 
 
 class ManualClassificationUpdate(BaseModel):
@@ -80,6 +113,14 @@ class PropertyLocationUpdate(BaseModel):
     region: str | None = None
     commune: str | None = None
     location_precision: Literal[
+        "PARCEL_POLYGON",
+        "EXACT_COORDINATES",
+        "VERIFIED_ADDRESS",
+        "STREET_ADDRESS",
+        "SECTOR",
+        "COMMUNE_ONLY",
+        "REGION_ONLY",
+        "COUNTRY_ONLY",
         "EXACT",
         "APPROXIMATE",
         "CENTROID",

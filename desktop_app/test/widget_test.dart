@@ -35,10 +35,10 @@ void main() {
     expect(find.text('Todas las regiones'), findsOneWidget);
     expect(find.text('Todas las comunas'), findsOneWidget);
 
-    await tester.tap(find.text('Agregar comuna'));
+    await tester.tap(find.text('Cambiar'));
     await tester.pumpAndSettle();
 
-    expect(find.text('Seleccionar comunas'), findsOneWidget);
+    expect(find.text('Seleccionar comuna'), findsOneWidget);
     await tester.enterText(find.byType(TextField).last, 'Maipu');
     await tester.pumpAndSettle();
     expect(find.widgetWithText(CheckboxListTile, 'Maipu'), findsOneWidget);
@@ -50,9 +50,51 @@ void main() {
 
     expect(find.text('Maipu'), findsOneWidget);
   });
+
+  testWidgets('sends smart default keywords plus additional terms', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(1200, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final api = _FakeApi();
+
+    await tester.pumpWidget(LandfinderApp(api: api));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Busqueda'));
+    await tester.pumpAndSettle();
+    await tester.ensureVisible(find.text('Iniciar busqueda'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Iniciar busqueda'));
+    await tester.pumpAndSettle();
+
+    expect(
+      api.lastStartFilters?['keywords'],
+      containsAll(['terreno', 'predio']),
+    );
+    expect(api.lastStartFilters?['keyword_mode'], 'ANY');
+
+    await tester.enterText(
+      find.widgetWithText(TextField, 'Palabras adicionales (opcional)'),
+      'macrolote',
+    );
+    await tester.testTextInput.receiveAction(TextInputAction.done);
+    await tester.pumpAndSettle();
+    await tester.ensureVisible(find.text('Iniciar busqueda'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Iniciar busqueda'));
+    await tester.pumpAndSettle();
+
+    expect(api.lastStartFilters?['keywords'], contains('macrolote'));
+    expect(api.lastStartFilters?['keywords'], contains('sitio eriazo'));
+  });
 }
 
 class _FakeApi implements LandfinderApi {
+  Map<String, dynamic>? lastStartFilters;
+
   @override
   Future<void> start() async {}
 
@@ -136,13 +178,70 @@ class _FakeApi implements LandfinderApi {
 
   @override
   Future<Map<String, dynamic>> communes(String regionCode) async {
+    if (regionCode == 'ALL') {
+      return {
+        'region_code': regionCode,
+        'items': [
+          {
+            'code': 'CL-AT-001',
+            'name': 'Chanaral',
+            'commune_id': 'CL-AT-001',
+            'commune_name': 'Chanaral',
+            'region_id': 'CL-AT',
+            'region_code': 'CL-AT',
+            'region_name': 'Atacama',
+          },
+          {
+            'code': 'CL-RM-002',
+            'name': 'Maipu',
+            'commune_id': 'CL-RM-002',
+            'commune_name': 'Maipu',
+            'region_id': 'CL-RM',
+            'region_code': 'CL-RM',
+            'region_name': 'Metropolitana de Santiago',
+          },
+        ],
+      };
+    }
     return {
       'region_code': regionCode,
       'items': [
-        {'code': '$regionCode-001', 'name': 'Cerrillos'},
-        {'code': '$regionCode-002', 'name': 'Maipu'},
-        {'code': '$regionCode-003', 'name': 'Pudahuel'},
-        {'code': '$regionCode-004', 'name': 'Santiago'},
+        {
+          'code': '$regionCode-001',
+          'name': 'Cerrillos',
+          'commune_id': '$regionCode-001',
+          'commune_name': 'Cerrillos',
+          'region_id': regionCode,
+          'region_code': regionCode,
+          'region_name': 'Metropolitana de Santiago',
+        },
+        {
+          'code': '$regionCode-002',
+          'name': 'Maipu',
+          'commune_id': '$regionCode-002',
+          'commune_name': 'Maipu',
+          'region_id': regionCode,
+          'region_code': regionCode,
+          'region_name': 'Metropolitana de Santiago',
+        },
+        {
+          'code': '$regionCode-003',
+          'name': 'Pudahuel',
+          'commune_id': '$regionCode-003',
+          'commune_name': 'Pudahuel',
+          'region_id': regionCode,
+          'region_code': regionCode,
+          'region_name': 'Metropolitana de Santiago',
+        },
+        {
+          'code': '$regionCode-004',
+          'name': 'Santiago',
+          'commune_id': '$regionCode-004',
+          'commune_name': 'Santiago',
+          'region_id': regionCode,
+          'region_code': regionCode,
+          'region_name': 'Metropolitana de Santiago',
+        },
       ],
     };
   }
@@ -312,6 +411,7 @@ class _FakeApi implements LandfinderApi {
 
   @override
   Future<Map<String, dynamic>> startSearch(Map<String, dynamic> filters) async {
+    lastStartFilters = Map<String, dynamic>.from(filters);
     return {'search_id': 'job-1', 'status': 'QUEUED'};
   }
 

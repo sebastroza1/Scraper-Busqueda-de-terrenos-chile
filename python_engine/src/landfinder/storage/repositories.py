@@ -37,6 +37,31 @@ def _num(value: Decimal | int | float | None) -> str | int | float | None:
     return str(value) if isinstance(value, Decimal) else value
 
 
+def _append_unique_json_flags(raw: str | None, flags: list[str]) -> list[str]:
+    try:
+        values = json.loads(raw or "[]")
+    except json.JSONDecodeError:
+        values = []
+    if not isinstance(values, list):
+        values = []
+    result = [str(item) for item in values]
+    for flag in flags:
+        if flag not in result:
+            result.append(flag)
+    return result
+
+
+def _remove_json_flags(raw: str | None, flags: list[str]) -> list[str]:
+    try:
+        values = json.loads(raw or "[]")
+    except json.JSONDecodeError:
+        values = []
+    if not isinstance(values, list):
+        values = []
+    blocked = set(flags)
+    return [str(item) for item in values if str(item) not in blocked]
+
+
 class Database:
     def __init__(self, database_path: str | Path) -> None:
         self.database_path = Path(database_path)
@@ -89,6 +114,14 @@ class PropertyRepository:
                 record.geocoded_at.isoformat() if record.geocoded_at else None,
                 record.geocoding_source,
                 record.geocoding_confidence,
+                record.geometry_status,
+                record.geometry_source,
+                record.geometry_type,
+                _json(record.parcel_geometry) if record.parcel_geometry else None,
+                record.geometry_area_m2,
+                record.geometry_perimeter_m,
+                record.official_area_m2,
+                record.area_difference_percent,
                 _num(record.price_clp),
                 _num(record.price_uf),
                 record.uf_date.isoformat() if record.uf_date else None,
@@ -124,7 +157,10 @@ class PropertyRepository:
                   listing_status, region, province, commune, original_address,
                   normalized_address, latitude, longitude, location_precision,
                   location_source, location_method, geocoded_at, geocoding_source,
-                  geocoding_confidence, asking_price_clp, asking_price_uf, uf_date,
+                  geocoding_confidence, geometry_status, geometry_source,
+                  geometry_type, parcel_geometry, geometry_area_m2,
+                  geometry_perimeter_m, official_area_m2, area_difference_percent,
+                  asking_price_clp, asking_price_uf, uf_date,
                   uf_rate, uf_rate_date, uf_source, uf_retrieved_at, uf_cache_hit,
                   gross_area_m2, advertised_area_m2, price_uf_m2_gross,
                   estimated_usable_area_m2, price_uf_m2_usable,
@@ -139,7 +175,8 @@ class PropertyRepository:
                   ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                   ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                   ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                  ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                  ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                  ?, ?, ?, ?, ?, ?, ?, ?
                 )
                 ON CONFLICT(internal_id) DO UPDATE SET
                   source = excluded.source,
@@ -162,6 +199,14 @@ class PropertyRepository:
                   geocoded_at = excluded.geocoded_at,
                   geocoding_source = excluded.geocoding_source,
                   geocoding_confidence = excluded.geocoding_confidence,
+                  geometry_status = excluded.geometry_status,
+                  geometry_source = excluded.geometry_source,
+                  geometry_type = excluded.geometry_type,
+                  parcel_geometry = excluded.parcel_geometry,
+                  geometry_area_m2 = excluded.geometry_area_m2,
+                  geometry_perimeter_m = excluded.geometry_perimeter_m,
+                  official_area_m2 = excluded.official_area_m2,
+                  area_difference_percent = excluded.area_difference_percent,
                   asking_price_clp = excluded.asking_price_clp,
                   asking_price_uf = excluded.asking_price_uf,
                   uf_date = excluded.uf_date,
@@ -198,7 +243,7 @@ class PropertyRepository:
         commune: str | None = None,
         source: str | None = None,
     ) -> list[dict[str, Any]]:
-        filters = []
+        filters = ["candidate_status = 'ACTIVE'"]
         params: list[Any] = []
         if commune:
             filters.append("commune = ?")
@@ -465,9 +510,123 @@ class PropertyRepository:
                 (status, now, _json(summary), now, internal_id),
             )
 
+    def update_admin_validation(
+        self,
+        internal_id: str,
+        validation: dict[str, Any],
+    ) -> dict[str, Any]:
+        now = utc_now().isoformat()
+        status = str(validation.get("admin_validation_status") or "GEOMETRY_UNKNOWN")
+        conflict_statuses = {
+            "COMMUNE_MISMATCH",
+            "REGION_MISMATCH",
+            "COMMUNE_AND_REGION_MISMATCH",
+            "OUTSIDE_CHILE",
+            "GEOMETRY_INVALID",
+        }
+        blocking_statuses = {
+            "REGION_MISMATCH",
+            "COMMUNE_AND_REGION_MISMATCH",
+            "OUTSIDE_CHILE",
+            "GEOMETRY_INVALID",
+        }
+        with self.database.transaction() as connection:
+            row = connection.execute(
+                """
+                SELECT anomaly_flags_json, territorial_status, territorial_summary_json
+                FROM property_candidates
+                WHERE internal_id = ?
+                """,
+                (internal_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(internal_id)
+            current_summary = _decode_json(row["territorial_summary_json"], default={})
+            release_admin_block = (
+                row["territorial_status"] == "BLOCKED_LOCATION_CONFLICT"
+                and isinstance(current_summary, dict)
+                and current_summary.get("status") == "BLOCKED_LOCATION_CONFLICT"
+                and status not in blocking_statuses
+            )
+            flags_json = (
+                _json(
+                    _append_unique_json_flags(
+                        row["anomaly_flags_json"],
+                        ["ADMIN_LOCATION_CONFLICT"],
+                    )
+                )
+                if status in conflict_statuses
+                else _json(
+                    _remove_json_flags(
+                        row["anomaly_flags_json"],
+                        ["ADMIN_LOCATION_CONFLICT"],
+                    )
+                )
+            )
+            connection.execute(
+                """
+                UPDATE property_candidates
+                SET source_epsg = ?,
+                    normalized_epsg = ?,
+                    source_region = ?,
+                    source_commune = ?,
+                    calculated_region = ?,
+                    calculated_commune = ?,
+                    admin_validation_status = ?,
+                    admin_validation_confidence = ?,
+                    admin_validation_reason = ?,
+                    territorial_status = CASE
+                      WHEN ? THEN 'BLOCKED_LOCATION_CONFLICT'
+                      WHEN ? THEN 'SIN_INFORMACION_SUFICIENTE'
+                      ELSE territorial_status
+                    END,
+                    territorial_summary_json = CASE
+                      WHEN ? THEN ?
+                      WHEN ? THEN '{}'
+                      ELSE territorial_summary_json
+                    END,
+                    anomaly_flags_json = ?,
+                    updated_at = ?
+                WHERE internal_id = ?
+                """,
+                (
+                    validation.get("source_epsg"),
+                    validation.get("normalized_epsg") or 4326,
+                    validation.get("source_region"),
+                    validation.get("source_commune"),
+                    validation.get("calculated_region"),
+                    validation.get("calculated_commune"),
+                    status,
+                    validation.get("admin_validation_confidence") or 0,
+                    validation.get("admin_validation_reason"),
+                    status in blocking_statuses,
+                    release_admin_block,
+                    status in blocking_statuses,
+                    _json(
+                        {
+                            "status": "BLOCKED_LOCATION_CONFLICT",
+                            "reason": validation.get("admin_validation_reason"),
+                            "admin_validation": validation,
+                        }
+                    ),
+                    release_admin_block,
+                    flags_json,
+                    now,
+                    internal_id,
+                ),
+            )
+        updated = self.get(internal_id)
+        if updated is None:
+            raise KeyError(internal_id)
+        return updated
+
     def count(self) -> int:
         with connect(self.database.database_path) as connection:
-            return int(connection.execute("SELECT COUNT(*) FROM property_candidates").fetchone()[0])
+            return int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM property_candidates WHERE candidate_status = 'ACTIVE'"
+                ).fetchone()[0]
+            )
 
     @staticmethod
     def _find_existing(
@@ -835,13 +994,32 @@ class SourceRecordAuditRepository:
 
         counts = {str(row["automatic_classification"]): int(row["count"]) for row in rows}
         total = sum(counts.values())
-        accepted = sum(counts.get(item, 0) for item in ("LAND_ACQUISITION", "LAND_SALE"))
-        possible = sum(counts.get(item, 0) for item in ("REAL_ESTATE", "POSSIBLE_LAND", "UNKNOWN"))
-        rejected = counts.get("FALSE_POSITIVE", 0)
+        accepted = sum(
+            counts.get(item, 0)
+            for item in (
+                "PROPERTY_FOR_SALE",
+                "PROPERTY_FOR_LEASE",
+                "PROPERTY_FOR_CONCESSION",
+                "LAND_SALE_PROCESS",
+            )
+        )
+        demand = sum(counts.get(item, 0) for item in ("LAND_DEMAND", "PROPERTY_DEMAND"))
+        possible = counts.get("UNKNOWN", 0)
+        rejected = sum(
+            counts.get(item, 0)
+            for item in (
+                "FALSE_POSITIVE",
+                "GOODS_FOR_PROPERTY",
+                "WORKS_ON_EXISTING_PROPERTY",
+                "LAND_RELATED_SERVICE",
+                "VALUATION_OR_STUDY",
+            )
+        )
         return {
             "total_analyzed": total,
             "distribution": counts,
             "accepted": accepted,
+            "demand": demand,
             "possible": possible,
             "rejected": rejected,
             "manual_reviewed": int(manual_reviewed),
@@ -1898,11 +2076,24 @@ def _decode_json(value: Any, *, default: Any) -> Any:
 def _bucket_classifications(bucket: str) -> list[str]:
     normalized = bucket.lower()
     if normalized in {"candidates", "candidate", "accepted", "candidatos"}:
-        return ["LAND_ACQUISITION", "LAND_SALE"]
+        return [
+            "PROPERTY_FOR_SALE",
+            "PROPERTY_FOR_LEASE",
+            "PROPERTY_FOR_CONCESSION",
+            "LAND_SALE_PROCESS",
+        ]
+    if normalized in {"demand", "demanda", "demanda_publica"}:
+        return ["LAND_DEMAND", "PROPERTY_DEMAND"]
     if normalized in {"possible", "posibles"}:
-        return ["REAL_ESTATE", "POSSIBLE_LAND", "UNKNOWN"]
+        return ["UNKNOWN"]
     if normalized in {"rejected", "descartados"}:
-        return ["FALSE_POSITIVE"]
+        return [
+            "FALSE_POSITIVE",
+            "GOODS_FOR_PROPERTY",
+            "WORKS_ON_EXISTING_PROPERTY",
+            "LAND_RELATED_SERVICE",
+            "VALUATION_OR_STUDY",
+        ]
     return []
 
 

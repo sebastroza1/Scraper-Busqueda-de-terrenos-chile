@@ -387,71 +387,133 @@ COMMUNES_BY_REGION: dict[str, list[str]] = {
     ],
 }
 
-LAND_SEARCH_KEYWORDS: list[str] = [
-    "terreno",
-    "terrenos",
-    "predio",
-    "predios",
-    "sitio",
-    "sitios",
-    "sitio eriazo",
-    "sitios eriazos",
-    "sitio vacio",
-    "sitio sin construir",
-    "eriazo",
-    "eriazos",
-    "terreno eriazo",
-    "terreno baldio",
-    "peladero",
-    "peladeros",
-    "pano",
-    "panos",
-    "gran pano",
-    "pano urbano",
-    "macrolote",
-    "macrolotes",
-    "lote",
-    "lotes",
-    "lote urbano",
-    "loteo",
-    "suelo",
-    "suelo urbano",
-    "suelo habitacional",
-    "suelo disponible",
-    "terreno urbano",
-    "terreno habitacional",
-    "predio urbano",
-    "inmueble",
-    "inmuebles",
-    "propiedad",
-    "propiedades",
-    "venta de terreno",
-    "venta terreno",
-    "venta de terrenos",
-    "adquisicion de terreno",
-    "adquisicion terreno",
-    "compra de terreno",
-    "compra terreno",
-    "enajenacion de terreno",
-    "enajenacion terreno",
-    "licitacion de terreno",
-    "licitacion terreno",
-    "terreno fiscal",
-    "terreno municipal",
-    "terreno serviu",
-    "terreno para vivienda",
-    "terreno para viviendas",
-    "terreno proyecto habitacional",
-    "terreno vivienda social",
-    "suelo para vivienda",
-    "suelo para proyecto habitacional",
-    "adquisicion de inmueble",
-    "venta de inmueble",
-    "compra de inmueble",
-    "serviu",
-    "proyecto habitacional",
-    "vivienda social",
+
+def communes_catalog(region_code: str = "ALL") -> list[dict[str, str]]:
+    normalized = region_code.strip().upper()
+    aliases = {region["legacy_code"].upper(): region["code"] for region in REGIONS} | {
+        region["code"].upper(): region["code"] for region in REGIONS
+    }
+    selected_codes = (
+        [region["code"] for region in REGIONS]
+        if normalized in {"ALL", "TODAS", "TODOS", "*"}
+        else [aliases[normalized]]
+        if normalized in aliases
+        else []
+    )
+    items: list[dict[str, str]] = []
+    for region in REGIONS:
+        if region["code"] not in selected_codes:
+            continue
+        for index, commune in enumerate(COMMUNES_BY_REGION.get(region["code"], []), start=1):
+            commune_id = f"{region['code']}-{index:03d}"
+            items.append(
+                {
+                    "code": commune_id,
+                    "name": commune,
+                    "commune_id": commune_id,
+                    "commune_name": commune,
+                    "region_id": region["code"],
+                    "region_code": region["code"],
+                    "region_name": region["name"],
+                    "region_legacy_code": region["legacy_code"],
+                }
+            )
+    return items
+
+LAND_KEYWORD_GROUPS: dict[str, list[str]] = {
+    "GENERIC_LAND": [
+        "terreno",
+        "terrenos",
+        "predio",
+        "predios",
+        "sitio",
+        "sitios",
+        "sitio eriazo",
+        "sitios eriazos",
+        "terreno eriazo",
+        "terreno baldio",
+        "suelo",
+        "pano",
+        "panos",
+        "macrolote",
+        "macrolotes",
+        "lote",
+        "lotes",
+        "lote urbano",
+        "parcela",
+        "parcelas",
+        "hijuela",
+        "hijuelas",
+        "fundo",
+        "fundos",
+        "campo",
+        "peladero",
+        "peladeros",
+        "propiedad",
+        "propiedades",
+        "inmueble",
+        "inmuebles",
+    ],
+    "URBAN_LAND": [
+        "terreno urbano",
+        "predio urbano",
+        "suelo urbano",
+        "suelo habitacional",
+        "terreno habitacional",
+        "lote urbano",
+        "pano urbano",
+        "sitio sin construir",
+        "sitio vacio",
+    ],
+    "COMMERCIAL_OPPORTUNITY": [
+        "venta de terreno",
+        "venta terreno",
+        "venta de terrenos",
+        "venta de predio",
+        "venta de inmueble",
+        "venta de lote",
+        "venta de sitio",
+        "venta de pano",
+        "venta de macrolote",
+        "enajenacion de terreno",
+        "enajenacion de inmueble",
+        "remate de terreno",
+        "remate terreno",
+        "remate de inmueble",
+        "subasta de terreno",
+        "subasta inmueble",
+        "licitacion terreno",
+        "venta publica terreno",
+    ],
+    "PUBLIC_DEMAND": [
+        "adquisicion de terreno",
+        "compra de terreno",
+        "compra terreno",
+        "adquisicion de predio",
+        "adquisicion de inmueble",
+        "compra de inmueble",
+    ],
+}
+
+LAND_NEGATIVE_CONTEXTS: list[str] = [
+    "movimiento de tierra",
+    "mecanica de suelo",
+    "estudio de suelo",
+    "limpieza de terreno",
+    "desmalezado",
+    "mantencion de terreno",
+    "cierre perimetral",
+    "levantamiento topografico",
+    "obras en terreno",
+    "mejoramiento de terreno",
+    "construccion",
+    "contenedores",
+    "recuperacion de espacio publico",
 ]
+
+LAND_SEARCH_KEYWORDS: list[str] = sorted(
+    {keyword for group in LAND_KEYWORD_GROUPS.values() for keyword in group}
+)
 
 
 def keyword_presets() -> list[dict[str, object]]:
@@ -462,6 +524,16 @@ def keyword_presets() -> list[dict[str, object]]:
             "description": "Preset amplio para suelo, predios y oportunidades habitacionales.",
             "keywords": LAND_SEARCH_KEYWORDS,
             "default_mode": "ANY",
+            "smart_default": True,
+            "groups": [
+                {
+                    "id": group_id,
+                    "name": group_id.replace("_", " ").title(),
+                    "term_count": len(keywords),
+                }
+                for group_id, keywords in LAND_KEYWORD_GROUPS.items()
+            ],
+            "exclusions": LAND_NEGATIVE_CONTEXTS,
         },
         {
             "id": "GENERAL",
