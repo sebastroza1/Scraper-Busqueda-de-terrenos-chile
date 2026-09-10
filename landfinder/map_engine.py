@@ -10,7 +10,7 @@ from pyproj import CRS, Transformer
 from shapely.geometry import shape, mapping, Point
 from shapely.ops import transform as shp_transform
 
-from .config import DEFAULT_TIMEOUT, USER_AGENT
+from .config import DEFAULT_TIMEOUT, USER_AGENT, source_config
 
 
 def bbox_from_point(lat: float, lon: float, radius_m: float) -> Tuple[float, float, float, float]:
@@ -21,9 +21,10 @@ def bbox_from_point(lat: float, lon: float, radius_m: float) -> Tuple[float, flo
 
 
 def _get(url, params=None, timeout=DEFAULT_TIMEOUT):
-    effective_timeout = max(timeout, 25) if "rest-sit.mop.gob.cl" in url else timeout
+    effective_timeout = min(timeout, source_config("mop")["timeout"]) if "rest-sit.mop.gob.cl" in url else timeout
     last_error = None
-    for attempt in range(2):
+    attempts = 1
+    for attempt in range(attempts):
         try:
             return requests.get(
                 url,
@@ -33,7 +34,7 @@ def _get(url, params=None, timeout=DEFAULT_TIMEOUT):
             )
         except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as exc:
             last_error = exc
-            if attempt == 0:
+            if attempt < attempts - 1:
                 time.sleep(0.8)
                 continue
             raise
@@ -55,7 +56,7 @@ def _local_transformers(lat: float, lon: float):
 def build_aoi_circle(lat: float, lon: float, radius_m: float):
     to_local, to_wgs84 = _local_transformers(lat, lon)
     center_local = shp_transform(to_local, Point(lon, lat))
-    circle_local = center_local.buffer(radius_m, resolution=48)
+    circle_local = center_local.buffer(radius_m, quad_segs=48)
     circle_wgs84 = shp_transform(to_wgs84, circle_local)
     return circle_local, circle_wgs84, to_local, to_wgs84
 
@@ -278,6 +279,8 @@ def query_arcgis_aoi(source, lat, lon, radius_m, timeout=DEFAULT_TIMEOUT, limit=
     for layer_url in _service_layer_urls(source):
         payload = _arcgis_query_json(layer_url, bbox, timeout, limit)
         raw_geojson = _esri_features_to_geojson(payload)
+        raw_count = len(payload.get("features") or [])
+        normalized_count = len(raw_geojson.get("features") or [])
 
         clipped, records = filter_clip_geojson_to_circle(
             raw_geojson,
@@ -292,6 +295,12 @@ def query_arcgis_aoi(source, lat, lon, radius_m, timeout=DEFAULT_TIMEOUT, limit=
             "geojson": clipped,
             "count": len(clipped.get("features") or []),
             "records": records,
+            "pipeline": {
+                "raw": raw_count,
+                "normalized": normalized_count,
+                "matching": len(clipped.get("features") or []),
+                "stored": len(records),
+            },
         })
 
     return layers
@@ -360,6 +369,7 @@ def query_wfs_aoi(source, lat, lon, radius_m, timeout=DEFAULT_TIMEOUT, limit=500
     r = _get(wfs_url, params, timeout)
     r.raise_for_status()
     raw = r.json()
+    raw_count = len(raw.get("features") or []) if isinstance(raw, dict) else 0
 
     clipped, records = filter_clip_geojson_to_circle(
         raw,
@@ -373,7 +383,29 @@ def query_wfs_aoi(source, lat, lon, radius_m, timeout=DEFAULT_TIMEOUT, limit=500
         "geojson": clipped,
         "count": len(clipped.get("features") or []),
         "records": records,
+        "pipeline": {
+            "raw": raw_count,
+            "normalized": raw_count,
+            "matching": len(clipped.get("features") or []),
+            "stored": len(records),
+        },
     }]
+
+
+def log_pipeline(source: Dict[str, Any], result: Dict[str, Any]) -> None:
+    rendered = sum(
+        len((layer.get("geojson") or {}).get("features") or [])
+        for layer in result.get("layers") or []
+        if isinstance(layer, dict)
+    )
+    raw = sum((layer.get("pipeline") or {}).get("raw", 0) for layer in result.get("layers") or [] if isinstance(layer, dict))
+    normalized = sum((layer.get("pipeline") or {}).get("normalized", 0) for layer in result.get("layers") or [] if isinstance(layer, dict))
+    matching = sum((layer.get("pipeline") or {}).get("matching", 0) for layer in result.get("layers") or [] if isinstance(layer, dict))
+    stored = len(result.get("records") or [])
+    print(
+        f"[SOURCE: {source.get('id')}] status={result.get('status')} "
+        f"raw={raw} normalized={normalized} matching={matching} stored={stored} rendered={rendered}"
+    )
 
 
 def try_wms_as_wfs(source, lat, lon, radius_m, timeout, limit):
@@ -399,7 +431,7 @@ def load_map_source(
     if kind in ("arcgis_service", "arcgis_layer"):
         layers = query_arcgis_aoi(source, lat, lon, radius_m, timeout, limit)
         records = [r for layer in layers for r in layer.get("records", [])]
-        return {
+        result = {
             "status": "OK" if records else "OK_SIN_COINCIDENCIAS",
             "type": "geojson_layers",
             "layers": layers,
@@ -407,11 +439,13 @@ def load_map_source(
             "records": records,
             "error": None,
         }
+        log_pipeline(source, result)
+        return result
 
     if kind == "wfs":
         layers = query_wfs_aoi(source, lat, lon, radius_m, timeout, limit)
         records = [r for layer in layers for r in layer.get("records", [])]
-        return {
+        result = {
             "status": "OK" if records else "OK_SIN_COINCIDENCIAS",
             "type": "geojson_layers",
             "layers": layers,
@@ -419,13 +453,15 @@ def load_map_source(
             "records": records,
             "error": None,
         }
+        log_pipeline(source, result)
+        return result
 
     if kind == "wms":
         # Preferimos WFS para tener recorte, conteo y atributos.
         try:
             layers = try_wms_as_wfs(source, lat, lon, radius_m, timeout, limit)
             records = [r for layer in layers for r in layer.get("records", [])]
-            return {
+            result = {
                 "status": "OK" if records else "OK_SIN_COINCIDENCIAS",
                 "type": "geojson_layers",
                 "layers": layers,
@@ -434,9 +470,11 @@ def load_map_source(
                 "error": None,
                 "note": "WMS convertido automáticamente a WFS para análisis vectorial.",
             }
+            log_pipeline(source, result)
+            return result
         except Exception as exc:
             # Si no hay WFS, se mantiene como referencia visual y NO se reporta 0.
-            return {
+            result = {
                 "status": "VISUAL_ONLY",
                 "type": "wms",
                 "layers": source.get("wms_layers") or [],
@@ -445,6 +483,8 @@ def load_map_source(
                 "error": None,
                 "note": f"Sin WFS vectorial disponible; capa WMS solo visual. {exc}",
             }
+            log_pipeline(source, result)
+            return result
 
     return {
         "status": "NOT_SUPPORTED",

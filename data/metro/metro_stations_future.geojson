@@ -1,0 +1,9 @@
+{
+  "type": "FeatureCollection",
+  "features": [],
+  "metadata": {
+    "dataset": "metro_stations_future",
+    "version": "osm-overpass-cache-v1",
+    "source": "OpenStreetMap Overpass"
+  }
+}

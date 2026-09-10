@@ -12,7 +12,7 @@ from urllib.parse import urljoin
 import requests
 from bs4 import BeautifulSoup
 
-from .config import DEFAULT_TIMEOUT, USER_AGENT
+from .config import DEFAULT_TIMEOUT, USER_AGENT, source_config
 
 
 @dataclass
@@ -54,11 +54,8 @@ def now_text() -> str:
 
 
 def request_get(url, params=None, timeout=DEFAULT_TIMEOUT, stream=False):
-    # Algunos servicios MOP son válidos pero responden de forma irregular.
-    # Se permite un timeout mayor y un retry corto para distinguir una caída
-    # real de un timeout aislado.
-    effective_timeout = max(timeout, 20) if "rest-sit.mop.gob.cl" in url else timeout
-    attempts = 2
+    effective_timeout = min(timeout, source_config("mop")["timeout"]) if "rest-sit.mop.gob.cl" in url else timeout
+    attempts = 1
     last_error = None
 
     for attempt in range(attempts):
@@ -606,3 +603,40 @@ def probe_source(source, timeout=DEFAULT_TIMEOUT):
     if kind in ("web_page", "binary_probe"):
         return probe_web(source, timeout)
     return base_result(source, error=f"Tipo de probe no soportado: {kind}")
+
+
+def health_state(result: ProbeResult | Dict[str, Any]) -> Dict[str, Any]:
+    data = result.to_dict() if isinstance(result, ProbeResult) else result
+    status = data.get("technical_status")
+    error_type = data.get("error_type")
+    http_status = data.get("http_status")
+    latency = data.get("latency_ms")
+
+    if status == "NOT_CONFIGURED":
+        health = "not_configured"
+    elif http_status == 429 or error_type == "HTTP_429":
+        health = "rate_limited"
+    elif status == "AUTH_REQUIRED" or error_type in {"TLS_SSL"}:
+        health = "auth_error" if status == "AUTH_REQUIRED" else "unknown"
+    elif error_type == "TIMEOUT":
+        health = "down"
+    elif status == "OK" and latency is not None and latency > 5000:
+        health = "slow"
+    elif status == "DEGRADED":
+        health = "slow" if latency is not None else "unknown"
+    elif status == "OK":
+        health = "healthy"
+    elif status == "SOURCE_ERROR":
+        health = "down"
+    else:
+        health = "unknown"
+
+    return {
+        "source_id": data.get("source_id"),
+        "status": health,
+        "latency_ms": latency,
+        "checked_at": data.get("checked_at"),
+        "technical_status": status,
+        "error_type": error_type,
+        "error": data.get("error"),
+    }

@@ -10,11 +10,12 @@ from pyproj import CRS, Transformer
 from shapely.geometry import Point, LineString, MultiLineString
 from shapely.ops import transform as shp_transform
 
-from .config import USER_AGENT
+from .config import USER_AGENT, source_config
 
 
 OVERPASS_ENDPOINTS = [
     "https://overpass-api.de/api/interpreter",
+    "https://overpass.osm.ch/api/interpreter",
     "https://overpass.kumi.systems/api/interpreter",
 ]
 
@@ -124,21 +125,33 @@ ASSET_TYPES = {
 
 
 def _overpass(query: str, timeout: int = 50) -> Dict[str, Any]:
-    last_error = None
-    for endpoint in OVERPASS_ENDPOINTS:
+    errors = []
+    deadline = time.perf_counter() + max(float(timeout), 1.0)
+    for index, endpoint in enumerate(OVERPASS_ENDPOINTS):
+        remaining = deadline - time.perf_counter()
+        if remaining <= 0:
+            break
+        endpoints_left = len(OVERPASS_ENDPOINTS) - index
+        request_timeout = max(1.0, min(remaining, remaining / endpoints_left))
         try:
             r = requests.post(
                 endpoint,
                 data={"data": query},
-                timeout=max(timeout, 50),
+                timeout=request_timeout,
                 headers={"User-Agent": USER_AGENT, "Accept": "application/json"},
             )
             r.raise_for_status()
             return r.json()
         except Exception as exc:
-            last_error = exc
-            time.sleep(0.8)
-    raise RuntimeError(f"Overpass no respondió: {last_error}")
+            host = endpoint.split("/")[2]
+            errors.append(f"{host}: {type(exc).__name__}")
+            if deadline - time.perf_counter() > 0.3:
+                time.sleep(0.2)
+    raise RuntimeError(
+        "OpenStreetMap/Overpass no respondió a tiempo. "
+        "Las demás fuentes pueden seguir funcionando. "
+        f"Intentos: {', '.join(errors)}"
+    )
 
 
 def normalize_line_ref(value: Any) -> str | None:
@@ -220,7 +233,7 @@ def analyze_line_in_aoi(
     to_local = _local_projector(lat, lon)
     local_geom = shp_transform(to_local, geom)
     center = Point(0, 0)
-    circle = center.buffer(radius_m, resolution=48)
+    circle = center.buffer(radius_m, quad_segs=48)
 
     distance = float(local_geom.distance(center))
     intersects = bool(local_geom.intersects(circle))
@@ -250,17 +263,20 @@ def query_current_metro_detailed(
     lat: float,
     lon: float,
     radius_m: float,
+    timeout: int | None = None,
 ) -> Dict[str, Dict[str, Any]]:
+    timeout = timeout or source_config("osm_overpass")["timeout"]
+    started = time.perf_counter()
     s, w, n, e = SANTIAGO_BBOX
 
     # relation + geometría de miembros. Esto es deliberadamente citywide:
     # el usuario pidió ver TODA la red y después saber qué líneas pasan por AOI.
     query = f"""
-    [out:json][timeout:60];
+    [out:json][timeout:{timeout}];
     relation["type"="route"]["route"="subway"]({s},{w},{n},{e});
     out body geom;
     """
-    payload = _overpass(query, timeout=60)
+    payload = _overpass(query, timeout=timeout)
 
     grouped = {
         ref: {
@@ -307,8 +323,9 @@ def query_current_metro_detailed(
 
     # Segunda consulta: estaciones, para poder mostrarlas aunque la relación
     # no incluya tags en sus miembros.
+    remaining_timeout = max(1, int(timeout - (time.perf_counter() - started)))
     station_query = f"""
-    [out:json][timeout:50];
+    [out:json][timeout:{remaining_timeout}];
     (
       nwr["railway"="station"]["station"="subway"]({s},{w},{n},{e});
       nwr["public_transport"="station"]["subway"="yes"]({s},{w},{n},{e});
@@ -317,7 +334,7 @@ def query_current_metro_detailed(
     out center tags;
     """
     try:
-        stations_payload = _overpass(station_query, timeout=50)
+        stations_payload = _overpass(station_query, timeout=remaining_timeout)
     except Exception:
         stations_payload = {"elements": []}
 
@@ -415,11 +432,13 @@ def query_future_metro_detailed(
     lat: float,
     lon: float,
     radius_m: float,
+    timeout: int | None = None,
 ) -> Dict[str, Dict[str, Any]]:
+    timeout = timeout or source_config("osm_overpass")["timeout"]
     s, w, n, e = SANTIAGO_BBOX
 
     query = f"""
-    [out:json][timeout:65];
+    [out:json][timeout:{timeout}];
     (
       relation["route"="subway"]["ref"~"^(7|8|9|L7|L8|L9)$"]({s},{w},{n},{e});
       relation["name"~"L[ií]nea (6|7|8|9)|Linea (6|7|8|9)",i]({s},{w},{n},{e});
@@ -430,7 +449,7 @@ def query_future_metro_detailed(
     );
     out body geom;
     """
-    payload = _overpass(query, timeout=65)
+    payload = _overpass(query, timeout=timeout)
 
     grouped = {}
     for ref in FUTURE_LINE_ORDER:
@@ -481,7 +500,9 @@ def query_built_assets(
     lon: float,
     radius_m: int,
     selected_types: List[str],
+    timeout: int | None = None,
 ) -> List[Dict[str, Any]]:
+    timeout = timeout or source_config("osm_overpass")["timeout"]
     clauses = []
     for key in selected_types:
         cfg = ASSET_TYPES.get(key)
@@ -491,10 +512,11 @@ def query_built_assets(
     if not clauses:
         return []
 
-    query = "[out:json][timeout:40];(" + "".join(clauses) + ");out center tags;"
-    payload = _overpass(query)
+    query = f"[out:json][timeout:{timeout}];(" + "".join(clauses) + ");out center tags;"
+    payload = _overpass(query, timeout=timeout)
 
     results = []
+    raw_count = len(payload.get("elements") or [])
     for el in payload.get("elements") or []:
         tags = el.get("tags") or {}
         if "lat" in el and "lon" in el:
@@ -535,12 +557,17 @@ def query_built_assets(
             "osm_id": el.get("id"),
         })
 
+    print(
+        f"[SOURCE: OSM_POI] raw={raw_count} normalized={raw_count} "
+        f"matching={len(results)} stored={len(results)} requested_types={','.join(selected_types)}"
+    )
     return results
 
 
-def query_osm_construction(lat: float, lon: float, radius_m: int) -> List[Dict[str, Any]]:
+def query_osm_construction(lat: float, lon: float, radius_m: int, timeout: int | None = None) -> List[Dict[str, Any]]:
+    timeout = timeout or source_config("osm_overpass")["timeout"]
     query = f"""
-    [out:json][timeout:40];
+    [out:json][timeout:{timeout}];
     (
       nwr(around:{int(radius_m)},{lat},{lon})["landuse"="construction"];
       nwr(around:{int(radius_m)},{lat},{lon})["building"="construction"];
@@ -548,7 +575,7 @@ def query_osm_construction(lat: float, lon: float, radius_m: int) -> List[Dict[s
     );
     out center tags;
     """
-    payload = _overpass(query)
+    payload = _overpass(query, timeout=timeout)
 
     results = []
     for el in payload.get("elements") or []:
