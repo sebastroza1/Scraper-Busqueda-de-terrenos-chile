@@ -11,6 +11,7 @@ from shapely.geometry import shape, mapping, Point
 from shapely.ops import transform as shp_transform
 
 from .config import DEFAULT_TIMEOUT, USER_AGENT, source_config
+from .source_states import ERROR, NOT_CONFIGURED, SUCCESS_DATA, SUCCESS_EMPTY, VISUAL_ONLY
 
 
 def bbox_from_point(lat: float, lon: float, radius_m: float) -> Tuple[float, float, float, float]:
@@ -432,7 +433,7 @@ def load_map_source(
         layers = query_arcgis_aoi(source, lat, lon, radius_m, timeout, limit)
         records = [r for layer in layers for r in layer.get("records", [])]
         result = {
-            "status": "OK" if records else "OK_SIN_COINCIDENCIAS",
+            "status": SUCCESS_DATA if records else SUCCESS_EMPTY,
             "type": "geojson_layers",
             "layers": layers,
             "count": sum(x["count"] for x in layers),
@@ -446,7 +447,7 @@ def load_map_source(
         layers = query_wfs_aoi(source, lat, lon, radius_m, timeout, limit)
         records = [r for layer in layers for r in layer.get("records", [])]
         result = {
-            "status": "OK" if records else "OK_SIN_COINCIDENCIAS",
+            "status": SUCCESS_DATA if records else SUCCESS_EMPTY,
             "type": "geojson_layers",
             "layers": layers,
             "count": sum(x["count"] for x in layers),
@@ -462,7 +463,7 @@ def load_map_source(
             layers = try_wms_as_wfs(source, lat, lon, radius_m, timeout, limit)
             records = [r for layer in layers for r in layer.get("records", [])]
             result = {
-                "status": "OK" if records else "OK_SIN_COINCIDENCIAS",
+                "status": SUCCESS_DATA if records else SUCCESS_EMPTY,
                 "type": "geojson_layers",
                 "layers": layers,
                 "count": sum(x["count"] for x in layers),
@@ -475,7 +476,7 @@ def load_map_source(
         except Exception as exc:
             # Si no hay WFS, se mantiene como referencia visual y NO se reporta 0.
             result = {
-                "status": "VISUAL_ONLY",
+                "status": VISUAL_ONLY,
                 "type": "wms",
                 "layers": source.get("wms_layers") or [],
                 "count": None,
@@ -487,7 +488,7 @@ def load_map_source(
             return result
 
     return {
-        "status": "NOT_SUPPORTED",
+        "status": NOT_CONFIGURED if kind == "unconfigured" else ERROR,
         "type": None,
         "layers": [],
         "count": None,

@@ -23,16 +23,19 @@ from landfinder.urban_value import _overpass
 
 
 class BasemapTests(unittest.TestCase):
-    def test_dark_basemap_uses_native_zoom_16(self):
+    def test_dark_basemap_uses_paired_carto_tiles(self):
         basemap = basemap_for_theme("Oscuro")
-        self.assertEqual(basemap.max_zoom, 19)
-        self.assertEqual(basemap.max_native_zoom, 16)
-        self.assertIn("arcgisonline.com", basemap.tiles)
+        self.assertEqual(basemap.max_zoom, 20)
+        self.assertEqual(basemap.max_native_zoom, 20)
+        self.assertIn("basemaps.cartocdn.com/dark_all", basemap.tiles)
 
-    def test_light_basemap_uses_osm_to_zoom_19(self):
-        basemap = basemap_for_theme("Claro")
-        self.assertEqual(basemap.max_native_zoom, 19)
-        self.assertIn("openstreetmap.org", basemap.tiles)
+    def test_light_basemap_uses_same_provider_family(self):
+        light = basemap_for_theme("Claro")
+        dark = basemap_for_theme("Oscuro")
+        self.assertEqual(light.max_native_zoom, dark.max_native_zoom)
+        self.assertIn("basemaps.cartocdn.com/light_all", light.tiles)
+        self.assertIn("CARTO", light.provider)
+        self.assertIn("CARTO", dark.provider)
 
     def test_esri_empty_tile_detector_only_matches_high_zoom_small_tiles(self):
         self.assertTrue(looks_like_empty_esri_tile(200, 2521, 17))
@@ -179,6 +182,21 @@ class MapEngineTimeoutTests(unittest.TestCase):
         self.assertGreaterEqual(post.call_count, 2)
         for call in post.call_args_list:
             self.assertLessEqual(call.kwargs["timeout"], 3)
+
+    @patch("landfinder.urban_value.requests.post")
+    def test_overpass_can_reject_suspicious_empty_mirror(self, post):
+        empty = Mock()
+        empty.raise_for_status.return_value = None
+        empty.json.return_value = {"elements": []}
+        populated = Mock()
+        populated.raise_for_status.return_value = None
+        populated.json.return_value = {"elements": [{"id": 1}]}
+        post.side_effect = [empty, populated]
+
+        payload = _overpass("[out:json];node(0,0,0,0);out;", timeout=3, require_nonempty=True)
+
+        self.assertEqual(payload["elements"], [{"id": 1}])
+        self.assertEqual(post.call_count, 2)
 
 
 class MetroAdapterTests(unittest.TestCase):

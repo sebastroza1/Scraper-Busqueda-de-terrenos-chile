@@ -5,13 +5,16 @@ import time
 from collections import Counter
 
 from landfinder.config import source_config
-from landfinder.metro_adapter import metro_current_for_area, metro_future_for_area
+from landfinder.metro_adapter import metro_current_for_area, metro_dataset_status, metro_future_for_area
 from landfinder.probes import health_state, probe_source
 from landfinder.registry import load_sources
+from landfinder.source_states import MISSING_DATA, SUCCESS_DATA
 from landfinder.storage import save_result
 
 
-def source_status_group(status: str) -> str:
+def source_status_group(status: str, technical_status: str | None = None) -> str:
+    if technical_status in {"NOT_CONFIGURED", MISSING_DATA}:
+        return "WARN"
     if status == "healthy":
         return "OK"
     if status in {"slow", "auth_error", "not_configured", "unknown"}:
@@ -34,24 +37,32 @@ def main() -> int:
 
     print("LANDFINDER SOURCE CHECK")
     print(f"Sources: {len(sources)} | Priorities: {', '.join(sorted(priorities))}")
+    print("SOURCE | PROVIDER | STATUS | LATENCY | CACHE | ELEMENTS | ERROR")
     totals: Counter[str] = Counter()
 
     start = time.perf_counter()
     try:
         current = metro_current_for_area(-33.5623, -70.60053, 2000)
-        future = metro_future_for_area(-33.5623, -70.60053, 2000)
+        future_status = metro_dataset_status("future")
+        future = metro_future_for_area(-33.5623, -70.60053, 2000) if future_status["status"] == SUCCESS_DATA else {}
         elapsed = int((time.perf_counter() - start) * 1000)
         line_count = sum(1 for line in current.values() if line.get("segments"))
         station_count = sum(len(line.get("stations") or []) for line in current.values())
         future_count = sum(1 for line in future.values() if line.get("segments"))
         totals["OK"] += 1
         print(
-            f"[OK] metro_cache | healthy | LOCAL | {elapsed}ms | "
-            f"current_lines={line_count} current_stations={station_count} future_lines={future_count}"
+            f"metro_current | local_cache | SUCCESS_DATA | {elapsed}ms | HIT | "
+            f"lines={line_count}; stations={station_count} | -"
+        )
+        future_group = "OK" if future_status["status"] == SUCCESS_DATA else "WARN"
+        totals[future_group] += 1
+        print(
+            f"metro_future | local_cache | {future_status['status']} | {elapsed}ms | HIT | "
+            f"lines={future_count}; stations={future_status.get('station_features')} | {future_status.get('error') or '-'}"
         )
     except Exception as exc:
         totals["FAIL"] += 1
-        print(f"[FAIL] metro_cache | down | LOCAL | - | {type(exc).__name__}: {str(exc)[:120]}")
+        print(f"metro_cache | local_cache | ERROR | - | MISS | - | {type(exc).__name__}: {str(exc)[:120]}")
 
     for source in sources:
         cfg = source_config(source)
@@ -60,13 +71,14 @@ def main() -> int:
         if args.save:
             save_result(result)
         health = health_state(result)
-        group = source_status_group(health["status"])
+        group = source_status_group(health["status"], result.get("technical_status"))
         totals[group] += 1
         latency = f"{result['latency_ms']}ms" if result.get("latency_ms") is not None else "-"
-        error = f" | {result['error_type'] or 'ERROR'}: {str(result.get('error') or '')[:120]}" if group == "FAIL" else ""
+        error = f"{result['error_type'] or 'ERROR'}: {str(result.get('error') or '')[:120]}" if result.get("error") else "-"
         print(
-            f"[{group}] {source['id']} | {health['status']} | {result['technical_status']} | "
-            f"{latency} | timeout={timeout}s{error}"
+            f"{source['id']} | {source['provider']} | {result['technical_status']} | "
+            f"{latency} | {'HIT' if result.get('technical_status') == 'OK' else '-'} | "
+            f"{result.get('feature_count') if result.get('feature_count') is not None else result.get('resource_count') or '-'} | {error}"
         )
 
     print(f"Totals: OK={totals['OK']} WARN={totals['WARN']} FAIL={totals['FAIL']}")

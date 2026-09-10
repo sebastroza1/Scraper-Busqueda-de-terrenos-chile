@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import time
 from datetime import datetime
 from typing import Any
@@ -17,10 +18,30 @@ from streamlit_folium import st_folium
 from landfinder.basemaps import basemap_for_theme
 from landfinder.config import USER_AGENT, source_config
 from landfinder.filter_model import build_source_plan
+from landfinder.icons import legend_symbol_html, marker_icon
 from landfinder.map_engine import load_map_source
-from landfinder.metro_adapter import metro_area_summary, metro_current_for_area, metro_future_for_area
+from landfinder.metro_adapter import metro_area_summary, metro_current_for_area, metro_dataset_status, metro_future_for_area
+from landfinder.persistent_cache import read_persistent_cache, write_persistent_cache
 from landfinder.probes import health_state, probe_source
 from landfinder.registry import load_sources
+from landfinder.runtime_sources import provider_key_for
+from landfinder.source_states import (
+    CIRCUIT_OPEN,
+    ERROR,
+    FAILURE_STATES,
+    MISSING_DATA,
+    NOT_CONFIGURED,
+    RATE_LIMITED,
+    STALE,
+    SUCCESS_DATA,
+    SUCCESS_EMPTY,
+    TERMINAL_STATES,
+    TIMEOUT,
+    VISUAL_ONLY,
+    classify_runtime_error,
+    normalize_status,
+    source_result_count,
+)
 from landfinder.storage import load_history, save_result
 from landfinder.urban_value import (
     ASSET_TYPES,
@@ -683,15 +704,91 @@ def in_rm_bounds(lat: float, lon: float) -> bool:
     )
 
 
+def requested_house_number(text: str) -> str | None:
+    match = re.search(r"\b(\d{2,6})\b", text)
+    return match.group(1) if match else None
+
+
+def geocode_record(
+    query: str,
+    lat: float,
+    lon: float,
+    zoom: int,
+    display_name: str,
+    *,
+    source: str,
+    address: dict[str, Any] | None = None,
+    fallback_exact: bool = False,
+    raw: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    normalized_query = normalize_query(query)
+    normalized_display = normalize_query(display_name)
+    address = address or {}
+    requested_number = requested_house_number(query)
+    found_number = str(address.get("house_number") or "")
+    house_number_matched = bool(
+        fallback_exact or (requested_number and found_number and requested_number == found_number)
+    )
+    street_value = " ".join(
+        str(address.get(key) or "")
+        for key in ("road", "pedestrian", "footway", "suburb", "neighbourhood")
+    )
+    street_matched = any(
+        token and token in normalize_query(street_value or display_name)
+        for token in ("santa raquel", "irrarazaval", "providencia", "apoquindo")
+        if token in normalized_query
+    )
+    if fallback_exact and any(token in normalized_display for token in normalized_query.split() if not token.isdigit()):
+        street_matched = True
+    commune_value = str(address.get("city") or address.get("town") or address.get("municipality") or address.get("county") or "")
+    commune_matched = any(
+        normalize_query(commune) in normalized_display or normalize_query(commune) in normalize_query(commune_value)
+        for commune in COMMUNE_GAZETTEER
+        if normalize_query(commune) in normalized_query
+    )
+    if requested_number:
+        precision = "exact" if house_number_matched else "approximate"
+    elif street_matched:
+        precision = "street"
+    elif commune_matched:
+        precision = "commune"
+    else:
+        precision = "unknown"
+    confidence = "alta" if precision == "exact" else "media" if precision in {"street", "commune"} else "baja"
+    return {
+        "query": query,
+        "display_name": display_name,
+        "lat": float(lat),
+        "lon": float(lon),
+        "zoom": int(zoom),
+        "precision": precision,
+        "confidence": confidence,
+        "source": source,
+        "house_number_requested": requested_number,
+        "house_number_matched": house_number_matched,
+        "street_matched": bool(street_matched),
+        "commune_matched": bool(commune_matched),
+        "raw": raw or {},
+    }
+
+
 @st.cache_data(ttl=60 * 60 * 24, show_spinner=False)
-def geocode_address(text: str) -> tuple[float, float, int, str] | None:
+def geocode_address(text: str) -> dict[str, Any] | None:
     raw_query = text.strip()
     if not raw_query:
         return None
     normalized = normalize_query(raw_query)
     for key, fallback in ADDRESS_FALLBACKS.items():
         if key in normalized:
-            return fallback
+            return geocode_record(
+                raw_query,
+                fallback[0],
+                fallback[1],
+                fallback[2],
+                fallback[3],
+                source="fallback_local_verificado",
+                fallback_exact=True,
+            )
     address_query = looks_like_address(raw_query)
     queries = [raw_query]
     if address_query and not any(normalize_query(name) in normalized for name in COMMUNE_GAZETTEER):
@@ -703,7 +800,7 @@ def geocode_address(text: str) -> tuple[float, float, int, str] | None:
         ]
     queries = [query if "chile" in normalize_query(query) else f"{query}, Chile" for query in queries]
 
-    candidates: list[tuple[float, float, int, str]] = []
+    candidates: list[dict[str, Any]] = []
     try:
         for query in queries:
             params: dict[str, Any] = {
@@ -736,18 +833,33 @@ def geocode_address(text: str) -> tuple[float, float, int, str] | None:
                 if address_query and not in_rm_bounds(lat, lon):
                     continue
                 label = result.get("display_name") or raw_query
-                candidates.append((lat, lon, 16 if address_query else 13, label))
+                candidates.append(
+                    geocode_record(
+                        raw_query,
+                        lat,
+                        lon,
+                        16 if address_query else 13,
+                        label,
+                        source="nominatim",
+                        address=result.get("address") or {},
+                        raw=result,
+                    )
+                )
             if candidates:
                 break
     except Exception:
         return None
-    return candidates[0] if candidates else None
+    candidates.sort(key=lambda item: (item["precision"] != "exact", item["precision"] != "street"))
+    selected = candidates[0] if candidates else None
+    if selected:
+        selected["candidates"] = candidates[:5]
+    return selected
 
 
-def resolve_search(text: str) -> tuple[float, float, int, str] | None:
+def resolve_search_structured(text: str) -> dict[str, Any] | None:
     coords = parse_coordinates(text)
     if coords:
-        return coords[0], coords[1], 15, "coordenadas"
+        return geocode_record(text, coords[0], coords[1], 15, "coordenadas", source="coordinates", fallback_exact=True)
 
     if looks_like_address(text):
         geocoded = geocode_address(text)
@@ -757,8 +869,15 @@ def resolve_search(text: str) -> tuple[float, float, int, str] | None:
     key = normalize_query(text)
     for name, (lat, lon, zoom) in COMMUNE_GAZETTEER.items():
         if normalize_query(name) in key or key in normalize_query(name):
-            return lat, lon, zoom, name.title()
+            return geocode_record(text, lat, lon, zoom, name.title(), source="commune_gazetteer")
     return geocode_address(text)
+
+
+def resolve_search(text: str) -> tuple[float, float, int, str] | None:
+    resolved = resolve_search_structured(text)
+    if not resolved:
+        return None
+    return resolved["lat"], resolved["lon"], resolved["zoom"], resolved["display_name"]
 
 
 def compact_place_label(label: str, max_length: int = 96) -> str:
@@ -777,11 +896,15 @@ def clean_source_error(error: str | None) -> str:
         return ""
     if "OpenStreetMap/Overpass no respondió" in error:
         return error
-    if "overpass" in error.lower() or "HTTPSConnectionPool" in error:
+    if "overpass" in error.lower():
         return (
             "OpenStreetMap/Overpass no respondió a tiempo. "
-            "Puedes reintentar o continuar con fuentes SEIA, MOP, MINVU y territorio."
+            "Los datos OSM pueden seguir visibles si existe caché local."
         )
+    if "HTTPSConnectionPool" in error or "ConnectionError" in error or "Max retries exceeded" in error:
+        return "Proveedor temporalmente no disponible. Puedes reintentar esta fuente o continuar con las demás."
+    if "timed out" in error.lower() or "timeout" in error.lower():
+        return "La fuente demoró demasiado y fue aislada de las demás."
     if len(error) > 180:
         return error[:177].rstrip() + "..."
     return error
@@ -951,6 +1074,7 @@ def init_state() -> None:
         "source_cache": {},
         "source_status": {},
         "source_circuits": {},
+        "source_progress": {},
         "active_request_id": None,
         "mode": "Explorar",
         "map_center": SANTIAGO_CENTER,
@@ -963,6 +1087,7 @@ def init_state() -> None:
         "pending_area_point": None,
         "last_area_click_key": None,
         "selected_detail": None,
+        "last_search_location": None,
         "layer_search": "",
         "selected_built": [],
         "show_metro_current": False,
@@ -1102,8 +1227,8 @@ def should_show(label: str, terms: list[str]) -> bool:
 def status_text(result: dict[str, Any] | None) -> str:
     if not result:
         return "Sin consultar"
-    status = result.get("status")
-    count = result.get("count", 0)
+    status = normalize_status(result.get("status"), result.get("count"))
+    count = result.get("count")
     duration = result.get("duration_ms")
     cache = result.get("cache")
     suffix_parts = []
@@ -1112,15 +1237,25 @@ def status_text(result: dict[str, Any] | None) -> str:
     if cache in {"HIT", "STALE"}:
         suffix_parts.append("cache" if cache == "HIT" else "cache anterior")
     suffix = f" · {' · '.join(suffix_parts)}" if suffix_parts else ""
-    if status in {"OK", "CACHE_HIT"}:
+    if status == SUCCESS_DATA:
         return f"{count or 0} elementos{suffix}"
-    if status == "OK_SIN_COINCIDENCIAS":
+    if status == SUCCESS_EMPTY:
         return f"Sin coincidencias en el área{suffix}"
-    if status == "VISUAL_ONLY":
+    if status == VISUAL_ONLY:
         return f"Capa visual disponible{suffix}"
-    if status == "STALE_CACHE":
+    if status == STALE:
         return f"Fuente pausada; mostrando cache anterior ({count or 0})"
-    if status == "SOURCE_ERROR":
+    if status == TIMEOUT:
+        return f"La fuente demoró demasiado{suffix}"
+    if status == RATE_LIMITED:
+        return f"Proveedor limitó las consultas{suffix}"
+    if status == CIRCUIT_OPEN:
+        return "Circuito abierto por fallos repetidos"
+    if status == NOT_CONFIGURED:
+        return "Fuente no configurada"
+    if status == MISSING_DATA:
+        return "Dataset no disponible"
+    if status == ERROR:
         return f"No disponible temporalmente{suffix}"
     return status or "Sin estado"
 
@@ -1141,12 +1276,12 @@ def bundle_counts(bundle: dict[str, Any]) -> dict[str, Any]:
     risks = sum(
         int(result.get("count") or 0)
         for result in (bundle.get("risks") or {}).values()
-        if result.get("status") == "OK"
+        if normalize_status(result.get("status"), result.get("count")) == SUCCESS_DATA
     )
     territory = sum(
         int(result.get("count") or 0)
         for result in (bundle.get("technical") or {}).values()
-        if result.get("status") == "OK"
+        if normalize_status(result.get("status"), result.get("count")) == SUCCESS_DATA
     )
     return {
         "assets": len(bundle.get("visual_assets") or []),
@@ -1183,6 +1318,51 @@ def format_metro_summary(summary: dict[str, Any] | None) -> str:
         lines = "sin líneas cercanas"
     inside = summary.get("stations_inside_count", 0)
     return f"{station_text}; {lines}; {inside} estaciones dentro"
+
+
+def layer_state(bundle: dict[str, Any], source_id: str) -> dict[str, Any] | None:
+    return (bundle.get("layer_states") or {}).get(source_id)
+
+
+def count_summary_value(bundle: dict[str, Any], count_key: str, source_ids: list[str]) -> str:
+    if not bundle:
+        return "N/D"
+    states = [layer_state(bundle, source_id) for source_id in source_ids if layer_state(bundle, source_id)]
+    if not states:
+        return "No consultado"
+    statuses = [normalize_status(state.get("status"), state.get("count")) for state in states]
+    if any(status in FAILURE_STATES for status in statuses):
+        return "Temporalmente no disponible"
+    if any(status in {NOT_CONFIGURED, MISSING_DATA} for status in statuses):
+        return "Fuente no configurada"
+    return str(bundle_counts(bundle)[count_key])
+
+
+def risk_summary_value(bundle: dict[str, Any]) -> str:
+    if not bundle:
+        return "N/D"
+    risk_states = [
+        layer_state(bundle, source_id)
+        for source_id in RISK_LAYER_IDS
+        if layer_state(bundle, source_id)
+    ]
+    if not risk_states:
+        return "Pendiente de fuente"
+    statuses = [normalize_status(state.get("status"), state.get("count")) for state in risk_states]
+    if any(status in FAILURE_STATES or status in {NOT_CONFIGURED, MISSING_DATA} for status in statuses):
+        missing = sum(1 for status in statuses if status in FAILURE_STATES or status in {NOT_CONFIGURED, MISSING_DATA})
+        return f"Evaluación incompleta ({missing} fuentes)"
+    count = bundle_counts(bundle)["risks"]
+    return "Sin riesgos detectados" if count == 0 else f"{count} alertas"
+
+
+def source_progress(bundle: dict[str, Any]) -> tuple[int, int, float]:
+    states = list((bundle.get("layer_states") or {}).values())
+    total = len(states)
+    if total == 0:
+        return 0, 0, 0.0
+    done = sum(1 for state in states if normalize_status(state.get("status"), state.get("count")) in TERMINAL_STATES)
+    return done, total, done / total
 
 
 def terrain_filter_count() -> int:
@@ -1356,43 +1536,49 @@ def run_source(
 ) -> tuple[Any | None, dict[str, Any]]:
     cfg = cfg or source_config(SOURCE_BY_ID.get(source_id, source_id))
     key = cache_key_for(area, source_id, params)
-    cached = st.session_state.source_cache.get(key)
+    circuit_key = provider_key_for(source_id, SOURCE_BY_ID)
+    cached = st.session_state.source_cache.get(key) or read_persistent_cache(key)
+    if cached:
+        st.session_state.source_cache[key] = cached
     ttl = int(cfg.get("cache_ttl_seconds", 0) or 0)
     now = runtime_now()
     if cached and ttl and now - float(cached.get("stored_at", 0)) <= ttl:
         result = cached["value"]
         count = cached.get("count")
         set_source_status(source_id, "cache_hit", 0, count, "HIT")
-        state = {"status": "CACHE_HIT", "count": count, "error": None, "duration_ms": 0, "cache": "HIT"}
+        state = {"status": SUCCESS_DATA if (count or 0) > 0 else SUCCESS_EMPTY, "count": count, "error": None, "duration_ms": 0, "cache": "HIT"}
         return result, state
     if cached:
         set_source_status(source_id, "refreshing", 0, cached.get("count"), "STALE")
 
-    if not circuit_allows(source_id, cfg):
+    if not circuit_allows(circuit_key, cfg):
         count = cached.get("count") if cached else None
         if cached:
             set_source_status(source_id, "circuit_open_cache", 0, count, "STALE")
-            state = {"status": "STALE_CACHE", "count": count, "error": None, "duration_ms": 0, "cache": "STALE"}
+            state = {"status": STALE, "count": count, "error": None, "duration_ms": 0, "cache": "STALE"}
             return cached["value"], state
         error = "Fuente pausada temporalmente por fallos repetidos. Reintenta más tarde."
         set_source_status(source_id, "circuit_open", 0, None, "MISS", error)
-        return None, {"status": "SOURCE_ERROR", "count": None, "error": error, "duration_ms": 0, "cache": "MISS"}
+        return None, {"status": CIRCUIT_OPEN, "count": None, "error": error, "duration_ms": 0, "cache": "MISS"}
 
     start = time.perf_counter()
     try:
         result = producer()
         duration_ms = int((time.perf_counter() - start) * 1000)
         count = source_result_count(result)
-        st.session_state.source_cache[key] = {
+        cached_payload = {
             "value": result,
             "stored_at": now,
             "count": count,
             "lastUpdated": datetime.now().isoformat(timespec="seconds"),
         }
-        record_circuit_success(source_id)
+        st.session_state.source_cache[key] = cached_payload
+        if count is not None:
+            write_persistent_cache(key, cached_payload)
+        record_circuit_success(circuit_key)
         set_source_status(source_id, "success", duration_ms, count, "MISS")
         state = {
-            "status": "OK" if count else "OK_SIN_COINCIDENCIAS",
+            "status": SUCCESS_DATA if (count or 0) > 0 else SUCCESS_EMPTY,
             "count": count,
             "error": None,
             "duration_ms": duration_ms,
@@ -1402,40 +1588,20 @@ def run_source(
     except Exception as exc:
         duration_ms = int((time.perf_counter() - start) * 1000)
         error = str(exc)
-        record_circuit_failure(source_id, cfg)
+        status = classify_runtime_error(error)
+        record_circuit_failure(circuit_key, cfg)
         if cached:
             count = cached.get("count")
             set_source_status(source_id, "stale_cache", duration_ms, count, "STALE", error)
             return cached["value"], {
-                "status": "STALE_CACHE",
+                "status": STALE,
                 "count": count,
                 "error": error,
                 "duration_ms": duration_ms,
                 "cache": "STALE",
             }
-        set_source_status(source_id, "timeout" if "timeout" in error.lower() else "error", duration_ms, None, "MISS", error)
-        return None, {"status": "SOURCE_ERROR", "count": None, "error": error, "duration_ms": duration_ms, "cache": "MISS"}
-
-
-def source_result_count(result: Any) -> int:
-    if result is None:
-        return 0
-    if isinstance(result, list):
-        return len(result)
-    if isinstance(result, dict):
-        if "count" in result and isinstance(result.get("count"), int):
-            return int(result["count"])
-        if "features" in result and isinstance(result.get("features"), list):
-            return len(result["features"])
-        if all(isinstance(value, dict) for value in result.values()):
-            total = 0
-            for value in result.values():
-                if "segments" in value:
-                    total += len(value.get("segments") or [])
-                elif "stations_in_area" in value:
-                    total += len(value.get("stations_in_area") or [])
-            return total
-    return 0
+        set_source_status(source_id, "timeout" if status == TIMEOUT else "error", duration_ms, None, "MISS", error)
+        return None, {"status": status, "count": None, "error": error, "duration_ms": duration_ms, "cache": "MISS"}
 
 
 def add_area_circle(map_obj: folium.Map, area: dict[str, Any], active: bool = False) -> None:
@@ -1452,16 +1618,20 @@ def add_area_circle(map_obj: folium.Map, area: dict[str, Any], active: bool = Fa
         fill_opacity=0.16 if active else 0.09,
         tooltip=f"{area['name']} · {area['sector']}",
     ).add_to(map_obj)
-    folium.CircleMarker(
-        [area["lat"], area["lon"]],
-        radius=8,
-        color="#FFFFFF",
-        weight=3,
-        fill=True,
-        fill_color=color,
-        fill_opacity=1,
-        tooltip=f"{area['name']} · {area['sector']}",
-    ).add_to(map_obj)
+    location = area.get("search_location")
+    if location:
+        add_location_marker(map_obj, location, area_name=area["name"])
+    else:
+        folium.CircleMarker(
+            [area["lat"], area["lon"]],
+            radius=8,
+            color="#FFFFFF",
+            weight=3,
+            fill=True,
+            fill_color=color,
+            fill_opacity=1,
+            tooltip=f"{area['name']} · centro de análisis",
+        ).add_to(map_obj)
     folium.Marker(
         [area["lat"], area["lon"]],
         icon=folium.DivIcon(
@@ -1472,6 +1642,24 @@ def add_area_circle(map_obj: folium.Map, area: dict[str, Any], active: bool = Fa
               {area['name']}
             </div>
             """
+        ),
+    ).add_to(map_obj)
+
+
+def add_location_marker(map_obj: folium.Map, location: dict[str, Any], area_name: str | None = None) -> None:
+    precision = location.get("precision") or "unknown"
+    label = "Ubicación encontrada" if precision == "exact" else "Ubicación aproximada"
+    if area_name:
+        label = f"{label} · {area_name}"
+    folium.Marker(
+        [float(location["lat"]), float(location["lon"])],
+        icon=marker_icon("selected_location"),
+        tooltip=f"{label}: {compact_place_label(location.get('display_name') or location.get('query') or '', 72)}",
+        popup=(
+            f"<b>{label}</b><br>"
+            f"{compact_place_label(location.get('display_name') or '', 120)}<br>"
+            f"Precisión: {precision}<br>"
+            f"Número coincidente: {'sí' if location.get('house_number_matched') else 'no'}"
         ),
     ).add_to(map_obj)
 
@@ -1490,18 +1678,17 @@ def add_metro_line(map_obj: folium.Map, line: dict[str, Any], future: bool = Fal
             dash_array="9 7" if future else None,
             tooltip=label,
         ).add_to(group)
-    if not future:
-        for station in line.get("stations_in_area") or []:
-            folium.CircleMarker(
-                [station["lat"], station["lon"]],
-                radius=4,
-                color=color,
-                weight=2,
-                fill=True,
-                fill_color="#FFFFFF",
-                fill_opacity=1,
-                tooltip=f"{station.get('name')} · {ref}",
-            ).add_to(group)
+    for station in line.get("stations") or []:
+        folium.CircleMarker(
+            [station["lat"], station["lon"]],
+            radius=4 if not future else 5,
+            color=color,
+            weight=2,
+            fill=True,
+            fill_color="#FFFFFF" if not future else color,
+            fill_opacity=1,
+            tooltip=f"{station.get('name')} · {ref}",
+        ).add_to(group)
     group.add_to(map_obj)
 
 
@@ -1553,7 +1740,7 @@ def legend_html(snapshot: dict[str, Any]) -> str:
     for asset_type in snapshot.get("built") or []:
         cfg = ASSET_TYPES.get(asset_type)
         if cfg:
-            items.append((cfg["color"], cfg["label"], "dot"))
+            items.append((asset_type, cfg["label"], "icon"))
     if snapshot.get("metro_current"):
         items.append(("#E31B23", "Metro actual", "line"))
     if snapshot.get("metro_future"):
@@ -1575,14 +1762,20 @@ def legend_html(snapshot: dict[str, Any]) -> str:
         return ""
 
     rows = []
-    for color, label, kind in items[:14]:
+    for color_or_key, label, kind in items[:14]:
         if kind == "line":
+            color = color_or_key
             symbol = f"<span style='display:inline-block;width:22px;border-top:4px solid {color};'></span>"
         elif kind == "dash":
+            color = color_or_key
             symbol = f"<span style='display:inline-block;width:22px;border-top:4px dashed {color};'></span>"
         elif kind == "poly":
+            color = color_or_key
             symbol = f"<span style='display:inline-block;width:14px;height:10px;background:{color}33;border:2px solid {color};'></span>"
+        elif kind == "icon":
+            symbol = legend_symbol_html(color_or_key)
         else:
+            color = color_or_key
             symbol = f"<span style='display:inline-block;width:10px;height:10px;background:{color};border-radius:50%;'></span>"
         rows.append(f"<span style='display:inline-flex;align-items:center;gap:6px;margin-right:12px;'>{symbol}{label}</span>")
 
@@ -1687,29 +1880,30 @@ def query_area(area: dict[str, Any], snapshot: dict[str, Any], request_id: str |
         return request_id is None or st.session_state.get("active_request_id") == request_id
 
     if source_plan["built_query_types"]:
-        result, state = run_source(
-            "built",
-            {"types": source_plan["built_query_types"]},
-            area,
-            lambda: query_built_assets(
-                area["lat"],
-                area["lon"],
-                area["radius_m"],
-                source_plan["built_query_types"],
-                timeout=overpass_timeout,
-            ),
-            overpass_cfg,
-        )
-        if not request_is_current():
-            return bundle
-        bundle["assets"] = result or []
+        for asset_type in source_plan["built_query_types"]:
+            result, state = run_source(
+                f"built_{asset_type}",
+                {"type": asset_type},
+                area,
+                lambda asset_type=asset_type: query_built_assets(
+                    area["lat"],
+                    area["lon"],
+                    area["radius_m"],
+                    [asset_type],
+                    timeout=overpass_timeout,
+                ),
+                overpass_cfg,
+            )
+            if not request_is_current():
+                return bundle
+            bundle["assets"].extend(result or [])
+            bundle["layer_states"][f"built_{asset_type}"] = state
         visual_types = set(source_plan["built_visual_types"])
         bundle["visual_assets"] = [item for item in bundle["assets"] if item.get("type") in visual_types]
         print(
             f"[SOURCE: OSM_POI] stored={len(bundle['assets'])} "
             f"rendered={len(bundle['visual_assets'])} visual_types={','.join(sorted(visual_types)) or 'none'}"
         )
-        bundle["layer_states"]["built"] = state
 
     if source_plan["metro_current"]:
         result, state = run_source(
@@ -1725,22 +1919,35 @@ def query_area(area: dict[str, Any], snapshot: dict[str, Any], request_id: str |
         bundle["layer_states"]["metro_current"] = state
 
     if source_plan["metro_future"]:
-        result, state = run_source(
-            "metro_future",
-            {"dataset": "local_geojson"},
-            area,
-            lambda: metro_future_for_area(area["lat"], area["lon"], area["radius_m"], timeout=int(metro_cfg["timeout"])),
-            metro_cfg,
-        )
-        if not request_is_current():
-            return bundle
-        bundle["metro_future"] = result or {}
-        available = sum(1 for line in bundle["metro_future"].values() if line.get("geometry_available"))
-        bundle["layer_states"]["metro_future"] = {
-            **state,
-            "status": "OK" if available else "OK_SIN_COINCIDENCIAS",
-            "count": available,
-        }
+        future_dataset = metro_dataset_status("future")
+        if future_dataset["status"] == MISSING_DATA:
+            bundle["layer_states"]["metro_future"] = {
+                "status": MISSING_DATA,
+                "count": None,
+                "error": future_dataset.get("error"),
+                "duration_ms": 0,
+                "cache": "MISS",
+                "dataset": future_dataset,
+            }
+            bundle["metro_future"] = {}
+        else:
+            result, state = run_source(
+                "metro_future",
+                {"dataset": "local_geojson"},
+                area,
+                lambda: metro_future_for_area(area["lat"], area["lon"], area["radius_m"], timeout=int(metro_cfg["timeout"])),
+                metro_cfg,
+            )
+            if not request_is_current():
+                return bundle
+            bundle["metro_future"] = result or {}
+            available = sum(1 for line in bundle["metro_future"].values() if line.get("geometry_available"))
+            bundle["layer_states"]["metro_future"] = {
+                **state,
+                "status": SUCCESS_DATA if available else SUCCESS_EMPTY,
+                "count": available,
+                "dataset": future_dataset,
+            }
 
     if source_plan["osm_construction"]:
         result, state = run_source(
@@ -1780,7 +1987,7 @@ def query_area(area: dict[str, Any], snapshot: dict[str, Any], request_id: str |
         )
         if not request_is_current():
             return bundle
-        result = result or {"status": "SOURCE_ERROR", "type": None, "layers": [], "records": [], "count": None, "error": state.get("error")}
+        result = result or {"status": state.get("status", ERROR), "type": None, "layers": [], "records": [], "count": None, "error": state.get("error")}
         bundle["future_gis"][source_id] = result
         bundle["layer_states"][source_id] = state_from_map_result(result, state)
         for record in result.get("records") or []:
@@ -1809,7 +2016,7 @@ def query_area(area: dict[str, Any], snapshot: dict[str, Any], request_id: str |
         )
         if not request_is_current():
             return bundle
-        result = result or {"status": "SOURCE_ERROR", "type": None, "layers": [], "records": [], "count": None, "error": state.get("error")}
+        result = result or {"status": state.get("status", ERROR), "type": None, "layers": [], "records": [], "count": None, "error": state.get("error")}
         bundle["technical"][source_id] = result
         bundle["layer_states"][source_id] = state_from_map_result(result, state)
 
@@ -1829,7 +2036,7 @@ def query_area(area: dict[str, Any], snapshot: dict[str, Any], request_id: str |
         )
         if not request_is_current():
             return bundle
-        result = result or {"status": "SOURCE_ERROR", "type": None, "layers": [], "records": [], "count": None, "error": state.get("error")}
+        result = result or {"status": state.get("status", ERROR), "type": None, "layers": [], "records": [], "count": None, "error": state.get("error")}
         bundle["restriction_data"][source_id] = result
         if source_id in source_plan["risk_visual_sources"]:
             bundle["risks"][source_id] = result
@@ -2034,14 +2241,16 @@ def render_left_panel(area: dict[str, Any] | None) -> None:
                     radius = st.selectbox("Radio", [500, 1000, 2000, 3000, 5000], index=2)
                     submitted = st.form_submit_button("Confirmar área")
                 if submitted and new_id:
-                    resolved_area = resolve_search(address) if address.strip() else None
+                    resolved_area = resolve_search_structured(address) if address.strip() else None
                     if address.strip() and not resolved_area:
                         st.warning("No pude resolver esa dirección. Agrega comuna/ciudad, por ejemplo `Santa Raquel 8204, La Florida, Santiago`, o usa lat,lng.")
                         return
                     if resolved_area:
-                        lat = resolved_area[0]
-                        lon = resolved_area[1]
-                        sector = compact_place_label(resolved_area[3], 72)
+                        lat = resolved_area["lat"]
+                        lon = resolved_area["lon"]
+                        sector = compact_place_label(resolved_area["display_name"], 72)
+                        if resolved_area["precision"] != "exact" and resolved_area.get("house_number_requested"):
+                            st.warning(f"Ubicación aproximada: no fue posible localizar exactamente el número {resolved_area['house_number_requested']}.")
                     st.session_state.areas.append(
                         {
                             "id": new_id,
@@ -2053,6 +2262,7 @@ def render_left_panel(area: dict[str, Any] | None) -> None:
                             "color": AREA_COLORS[len(st.session_state.areas) % len(AREA_COLORS)],
                             "visible": True,
                             "geometry_type": "circle",
+                            "search_location": resolved_area,
                         }
                     )
                     st.session_state.active_area_id = new_id
@@ -2258,6 +2468,13 @@ def render_map() -> None:
     for area_item in st.session_state.areas:
         add_area_circle(map_obj, area_item, active=area_item["id"] == st.session_state.active_area_id)
 
+    last_location = st.session_state.get("last_search_location")
+    if last_location and not any(
+        (area.get("search_location") or {}).get("query") == last_location.get("query")
+        for area in st.session_state.areas
+    ):
+        add_location_marker(map_obj, last_location)
+
     if st.session_state.get("fit_all_areas_once"):
         bounds = combined_area_bounds(st.session_state.areas)
         if bounds:
@@ -2274,14 +2491,9 @@ def render_map() -> None:
             cluster = MarkerCluster(name=f"Equipamientos · {area_item['name']}")
             for item in bundle.get("visual_assets") or []:
                 distance = haversine_m(area_item["lat"], area_item["lon"], item["lat"], item["lon"])
-                folium.CircleMarker(
+                folium.Marker(
                     [item["lat"], item["lon"]],
-                    radius=6,
-                    color=item.get("color", "#1473E6"),
-                    weight=2,
-                    fill=True,
-                    fill_color=item.get("color", "#1473E6"),
-                    fill_opacity=0.92,
+                    icon=marker_icon(item.get("type") or "terrain", 34),
                     tooltip=f"{item.get('name')} · {item.get('category')}",
                     popup=(
                         f"<b>{item.get('name')}</b><br>{item.get('category')}<br>"
@@ -2305,14 +2517,9 @@ def render_map() -> None:
         if map_layers.get("osm_construction") and bundle.get("construction"):
             construction = folium.FeatureGroup(name=f"Construcciones OSM · {area_item['name']}", show=True)
             for item in bundle.get("construction") or []:
-                folium.CircleMarker(
+                folium.Marker(
                     [item["lat"], item["lon"]],
-                    radius=6,
-                    color="#FF8A32",
-                    weight=2,
-                    fill=True,
-                    fill_color="#FF8A32",
-                    fill_opacity=0.92,
+                    icon=marker_icon("construction", 34),
                     tooltip=item.get("name"),
                 ).add_to(construction)
             construction.add_to(map_obj)
@@ -2397,17 +2604,15 @@ def render_summary_panel(area: dict[str, Any] | None) -> None:
         metro_value = "N/D"
         if bundle:
             metro_value = format_metro_summary(bundle.get("metro_summary"))
-        risk_value = "Pendiente de fuente"
-        if bundle and any(layer_id in bundle.get("layer_states", {}) for layer_id in RISK_LAYER_IDS):
-            risk_value = "Sin riesgos detectados" if counts["risks"] == 0 else f"{counts['risks']} alertas"
+        risk_value = risk_summary_value(bundle)
         rows = [
             ("Área", f"{area['name']} · {compact_place_label(area['sector'], 34)}"),
             ("Superficie", f"{area_surface_km2(area):.1f} km2"),
             ("Uso de suelo", "Pendiente de fuente"),
             ("Metro cercano", metro_value),
             ("Riesgos", risk_value),
-            ("Equipamiento", str(counts["assets"]) if bundle else "N/D"),
-            ("Proyectos futuros", str(counts["future_records"]) if bundle else "N/D"),
+            ("Equipamiento", count_summary_value(bundle, "assets", [f"built_{asset_type}" for asset_type in ASSET_TYPES])),
+            ("Proyectos futuros", count_summary_value(bundle, "future_records", list(FUTURE_GIS_IDS.values()) + ["osm_construction"])),
             ("Terrenos encontrados", "No configurado"),
         ]
         html_rows = "".join(
@@ -2447,17 +2652,35 @@ def render_summary_panel(area: dict[str, Any] | None) -> None:
         if not bundle:
             st.caption("Aplica filtros para consultar fuentes.")
         else:
+            done, total, ratio = source_progress(bundle)
+            if total:
+                st.progress(ratio, text=f"Consultando fuentes del {area['name']}: {done} de {total} completadas")
+            retryable = []
             for layer_id, result in (bundle.get("layer_states") or {}).items():
                 label = LAYER_DISPLAY_NAMES.get(
-                    layer_id,
+                    layer_id.removeprefix("built_") if layer_id.startswith("built_") else layer_id,
                     source_label(layer_id) if layer_id in SOURCE_BY_ID else layer_id.replace("_", " ").title(),
                 )
+                if layer_id.startswith("built_"):
+                    label = ASSET_TYPES.get(layer_id.removeprefix("built_"), {}).get("label", label)
+                status = normalize_status(result.get("status"), result.get("count"))
+                if status in FAILURE_STATES:
+                    retryable.append(layer_id)
                 st.markdown(
                     f"<div class='lf-source-state'><b>{label}</b><br>{status_text(result)}</div>",
                     unsafe_allow_html=True,
                 )
-                if result.get("error"):
+                if result.get("error") and st.session_state.get("mode") == "Admin/API":
                     st.caption(clean_source_error(result.get("error")))
+            if retryable and st.button("Reintentar fallidas", use_container_width=True):
+                for layer_id in retryable:
+                    matching = [key for key in st.session_state.source_cache if f'"source": "{layer_id}"' in key]
+                    for key in matching:
+                        st.session_state.source_cache.pop(key, None)
+                    circuit_key = provider_key_for(layer_id, SOURCE_BY_ID)
+                    st.session_state.source_circuits.pop(circuit_key, None)
+                st.session_state.pending_filter_apply = True
+                st.rerun()
 
 
 def render_compare_panel() -> None:
@@ -2625,15 +2848,18 @@ with top_search:
         search_clicked = c2.form_submit_button("Buscar")
     if search_clicked and query:
         with st.spinner("Geocodificando ubicación..."):
-            resolved = resolve_search(query)
+            resolved = resolve_search_structured(query)
         if resolved:
-            st.session_state.map_center = (resolved[0], resolved[1])
-            st.session_state.map_zoom = resolved[2]
-            message = f"Mapa centrado en {compact_place_label(resolved[3])}."
+            st.session_state.map_center = (resolved["lat"], resolved["lon"])
+            st.session_state.map_zoom = resolved["zoom"]
+            st.session_state.last_search_location = resolved
+            message = f"Mapa centrado en {compact_place_label(resolved['display_name'])}."
             if hasattr(st, "toast"):
                 st.toast(message)
             else:
                 st.success(message)
+            if resolved["precision"] != "exact" and resolved.get("house_number_requested"):
+                st.warning(f"Ubicación aproximada: no fue posible localizar exactamente el número {resolved['house_number_requested']}.")
         else:
             st.warning("No encontré esa ubicación. Prueba agregar comuna/ciudad, por ejemplo `Av. Irarrázaval 2401, Ñuñoa`, o usa coordenadas `lat,lng`.")
 with top_nav:
@@ -2678,7 +2904,7 @@ if st.session_state.pending_filter_apply:
     current = active_area()
     target_areas = [current] if current else []
     if target_areas:
-        apply_filters_to_targets(target_areas)
+        apply_filters_to_targets(target_areas, st.empty())
         st.rerun()
 
 st.caption(

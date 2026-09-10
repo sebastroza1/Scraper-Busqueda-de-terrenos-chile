@@ -152,6 +152,40 @@ def _read_geojson(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def metro_dataset_status(kind: str) -> dict[str, Any]:
+    lines_key = "future_lines" if kind == "future" else "current_lines"
+    stations_key = "future_stations" if kind == "future" else "current_stations"
+    lines_file = METRO_FILES[lines_key]
+    stations_file = METRO_FILES[stations_key]
+    if not lines_file.exists() or not stations_file.exists():
+        return {
+            "status": "MISSING_DATA",
+            "line_features": None,
+            "station_features": None,
+            "source": "local_geojson_cache",
+            "error": "Dataset local de Metro no disponible.",
+        }
+    lines = _read_geojson(lines_file)
+    stations = _read_geojson(stations_file)
+    line_features = len(lines.get("features") or [])
+    station_features = len(stations.get("features") or [])
+    if line_features == 0 and station_features == 0:
+        return {
+            "status": "MISSING_DATA",
+            "line_features": 0,
+            "station_features": 0,
+            "source": (lines.get("metadata") or {}).get("source") or "local_geojson_cache",
+            "error": "Dataset local existe, pero no contiene geometrías de Metro.",
+        }
+    return {
+        "status": "SUCCESS_DATA",
+        "line_features": line_features,
+        "station_features": station_features,
+        "source": (lines.get("metadata") or {}).get("source") or "local_geojson_cache",
+        "error": None,
+    }
+
+
 def _base_lines(order: list[str], future: bool) -> dict[str, Any]:
     lines = {}
     for ref in order:

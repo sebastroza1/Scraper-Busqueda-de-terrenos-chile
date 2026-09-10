@@ -115,17 +115,18 @@ FUTURE_METRO_META = {
 
 
 ASSET_TYPES = {
-    "mall": {"label": "Mall / centro comercial", "query": '["shop"="mall"]', "color": "#8E44AD"},
-    "supermarket": {"label": "Supermercado", "query": '["shop"="supermarket"]', "color": "#2E8B57"},
-    "hospital": {"label": "Hospital / clínica", "query": '["amenity"~"hospital|clinic"]', "color": "#D62728"},
-    "education": {"label": "Universidad / educación superior", "query": '["amenity"~"university|college"]', "color": "#1F77B4"},
-    "park": {"label": "Parque", "query": '["leisure"="park"]', "color": "#4CAF50"},
-    "pharmacy": {"label": "Farmacia", "query": '["amenity"="pharmacy"]', "color": "#17A2B8"},
+    "mall": {"label": "Mall / centro comercial", "query": '["shop"="mall"]', "color": "#EC407A"},
+    "supermarket": {"label": "Supermercado", "query": '["shop"="supermarket"]', "color": "#FF7A1A"},
+    "hospital": {"label": "Hospital / clínica", "query": '["amenity"~"hospital|clinic"]', "color": "#FF3F4A"},
+    "education": {"label": "Universidad / educación superior", "query": '["amenity"~"university|college"]', "color": "#7C3AED"},
+    "park": {"label": "Parque", "query": '["leisure"="park"]', "color": "#10B981"},
+    "pharmacy": {"label": "Farmacia", "query": '["amenity"="pharmacy"]', "color": "#10B981"},
 }
 
 
-def _overpass(query: str, timeout: int = 50) -> Dict[str, Any]:
+def _overpass(query: str, timeout: int = 50, require_nonempty: bool = False) -> Dict[str, Any]:
     errors = []
+    empty_payload = None
     deadline = time.perf_counter() + max(float(timeout), 1.0)
     for index, endpoint in enumerate(OVERPASS_ENDPOINTS):
         remaining = deadline - time.perf_counter()
@@ -141,12 +142,19 @@ def _overpass(query: str, timeout: int = 50) -> Dict[str, Any]:
                 headers={"User-Agent": USER_AGENT, "Accept": "application/json"},
             )
             r.raise_for_status()
-            return r.json()
+            payload = r.json()
+            if require_nonempty and not payload.get("elements"):
+                empty_payload = payload
+                errors.append(f"{host}: empty")
+                continue
+            return payload
         except Exception as exc:
             host = endpoint.split("/")[2]
             errors.append(f"{host}: {type(exc).__name__}")
             if deadline - time.perf_counter() > 0.3:
                 time.sleep(0.2)
+    if empty_payload is not None:
+        return empty_payload
     raise RuntimeError(
         "OpenStreetMap/Overpass no respondió a tiempo. "
         "Las demás fuentes pueden seguir funcionando. "
@@ -276,7 +284,7 @@ def query_current_metro_detailed(
     relation["type"="route"]["route"="subway"]({s},{w},{n},{e});
     out body geom;
     """
-    payload = _overpass(query, timeout=timeout)
+    payload = _overpass(query, timeout=timeout, require_nonempty=True)
 
     grouped = {
         ref: {
@@ -449,7 +457,7 @@ def query_future_metro_detailed(
     );
     out body geom;
     """
-    payload = _overpass(query, timeout=timeout)
+    payload = _overpass(query, timeout=timeout, require_nonempty=True)
 
     grouped = {}
     for ref in FUTURE_LINE_ORDER:
@@ -507,13 +515,14 @@ def query_built_assets(
     for key in selected_types:
         cfg = ASSET_TYPES.get(key)
         if cfg:
-            clauses.append(f'nwr(around:{int(radius_m)},{lat},{lon}){cfg["query"]};')
+            for osm_type in ("node", "way", "relation"):
+                clauses.append(f'{osm_type}{cfg["query"]}(around:{int(radius_m)},{lat},{lon});')
 
     if not clauses:
         return []
 
     query = f"[out:json][timeout:{timeout}];(" + "".join(clauses) + ");out center tags;"
-    payload = _overpass(query, timeout=timeout)
+    payload = _overpass(query, timeout=timeout, require_nonempty=True)
 
     results = []
     raw_count = len(payload.get("elements") or [])
@@ -569,13 +578,19 @@ def query_osm_construction(lat: float, lon: float, radius_m: int, timeout: int |
     query = f"""
     [out:json][timeout:{timeout}];
     (
-      nwr(around:{int(radius_m)},{lat},{lon})["landuse"="construction"];
-      nwr(around:{int(radius_m)},{lat},{lon})["building"="construction"];
-      nwr(around:{int(radius_m)},{lat},{lon})["construction"];
+      node["landuse"="construction"](around:{int(radius_m)},{lat},{lon});
+      way["landuse"="construction"](around:{int(radius_m)},{lat},{lon});
+      relation["landuse"="construction"](around:{int(radius_m)},{lat},{lon});
+      node["building"="construction"](around:{int(radius_m)},{lat},{lon});
+      way["building"="construction"](around:{int(radius_m)},{lat},{lon});
+      relation["building"="construction"](around:{int(radius_m)},{lat},{lon});
+      node["construction"](around:{int(radius_m)},{lat},{lon});
+      way["construction"](around:{int(radius_m)},{lat},{lon});
+      relation["construction"](around:{int(radius_m)},{lat},{lon});
     );
     out center tags;
     """
-    payload = _overpass(query, timeout=timeout)
+    payload = _overpass(query, timeout=timeout, require_nonempty=True)
 
     results = []
     for el in payload.get("elements") or []:

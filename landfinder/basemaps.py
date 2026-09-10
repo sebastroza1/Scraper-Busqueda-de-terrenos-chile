@@ -17,6 +17,9 @@ class BasemapConfig:
     fallback_max_native_zoom: int
 
 
+CARTO_ATTRIBUTION = "&copy; OpenStreetMap contributors &copy; CARTO"
+CARTO_LIGHT = "https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png"
+CARTO_DARK = "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png"
 OSM_TILES = "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
 OSM_ATTRIBUTION = "&copy; OpenStreetMap contributors"
 
@@ -24,11 +27,11 @@ BASEMAPS = {
     "Claro": BasemapConfig(
         key="Claro",
         label="Claro",
-        provider="OpenStreetMap",
-        tiles=OSM_TILES,
-        attribution=OSM_ATTRIBUTION,
-        max_zoom=19,
-        max_native_zoom=19,
+        provider="CARTO Positron",
+        tiles=CARTO_LIGHT,
+        attribution=CARTO_ATTRIBUTION,
+        max_zoom=20,
+        max_native_zoom=20,
         fallback_tiles=OSM_TILES,
         fallback_attribution=OSM_ATTRIBUTION,
         fallback_max_native_zoom=19,
@@ -36,11 +39,11 @@ BASEMAPS = {
     "Oscuro": BasemapConfig(
         key="Oscuro",
         label="Oscuro",
-        provider="Esri World Dark Gray Base",
-        tiles="https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}",
-        attribution="Tiles &copy; Esri &mdash; Esri, DeLorme, NAVTEQ",
-        max_zoom=19,
-        max_native_zoom=16,
+        provider="CARTO Dark Matter",
+        tiles=CARTO_DARK,
+        attribution=CARTO_ATTRIBUTION,
+        max_zoom=20,
+        max_native_zoom=20,
         fallback_tiles=OSM_TILES,
         fallback_attribution=OSM_ATTRIBUTION,
         fallback_max_native_zoom=19,
