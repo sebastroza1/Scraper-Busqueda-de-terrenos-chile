@@ -15,11 +15,9 @@ class BasemapConfig:
     fallback_tiles: str
     fallback_attribution: str
     fallback_max_native_zoom: int
+    css_filter: str | None = None
 
 
-CARTO_ATTRIBUTION = "&copy; OpenStreetMap contributors &copy; CARTO"
-CARTO_LIGHT = "https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png"
-CARTO_DARK = "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png"
 OSM_TILES = "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
 OSM_ATTRIBUTION = "&copy; OpenStreetMap contributors"
 
@@ -27,11 +25,11 @@ BASEMAPS = {
     "Claro": BasemapConfig(
         key="Claro",
         label="Claro",
-        provider="CARTO Positron",
-        tiles=CARTO_LIGHT,
-        attribution=CARTO_ATTRIBUTION,
-        max_zoom=20,
-        max_native_zoom=20,
+        provider="OpenStreetMap Standard",
+        tiles=OSM_TILES,
+        attribution=OSM_ATTRIBUTION,
+        max_zoom=19,
+        max_native_zoom=19,
         fallback_tiles=OSM_TILES,
         fallback_attribution=OSM_ATTRIBUTION,
         fallback_max_native_zoom=19,
@@ -39,14 +37,15 @@ BASEMAPS = {
     "Oscuro": BasemapConfig(
         key="Oscuro",
         label="Oscuro",
-        provider="CARTO Dark Matter",
-        tiles=CARTO_DARK,
-        attribution=CARTO_ATTRIBUTION,
-        max_zoom=20,
-        max_native_zoom=20,
+        provider="OpenStreetMap Standard",
+        tiles=OSM_TILES,
+        attribution=OSM_ATTRIBUTION,
+        max_zoom=19,
+        max_native_zoom=19,
         fallback_tiles=OSM_TILES,
         fallback_attribution=OSM_ATTRIBUTION,
         fallback_max_native_zoom=19,
+        css_filter="invert(92%) hue-rotate(180deg) brightness(76%) contrast(92%) saturate(70%)",
     ),
 }
 

@@ -113,6 +113,12 @@ class IconRegistryTests(unittest.TestCase):
                 self.assertTrue(ICON_REGISTRY[key]["label"])
                 self.assertIn("<svg", marker_svg(key))
 
+    def test_category_markers_are_not_generic_when_registered(self):
+        self.assertNotEqual(marker_svg("hospital"), marker_svg("park"))
+        self.assertNotEqual(marker_svg("pharmacy"), marker_svg("supermarket"))
+        self.assertIn("cart", ICON_REGISTRY["supermarket"]["glyph"])
+        self.assertEqual(ICON_REGISTRY["park"]["glyph"], "tree")
+
 
 if __name__ == "__main__":
     unittest.main()

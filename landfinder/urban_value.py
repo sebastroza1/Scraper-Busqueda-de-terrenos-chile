@@ -126,15 +126,12 @@ ASSET_TYPES = {
 
 def _overpass(query: str, timeout: int = 50, require_nonempty: bool = False) -> Dict[str, Any]:
     errors = []
+    empty_hosts = []
     empty_payload = None
-    deadline = time.perf_counter() + max(float(timeout), 1.0)
-    for index, endpoint in enumerate(OVERPASS_ENDPOINTS):
-        remaining = deadline - time.perf_counter()
-        if remaining <= 0:
-            break
-        endpoints_left = len(OVERPASS_ENDPOINTS) - index
-        request_timeout = max(1.0, min(remaining, remaining / endpoints_left))
+    request_timeout = max(float(timeout), 1.0)
+    for endpoint in OVERPASS_ENDPOINTS:
         try:
+            host = endpoint.split("/")[2]
             r = requests.post(
                 endpoint,
                 data={"data": query},
@@ -145,20 +142,18 @@ def _overpass(query: str, timeout: int = 50, require_nonempty: bool = False) -> 
             payload = r.json()
             if require_nonempty and not payload.get("elements"):
                 empty_payload = payload
-                errors.append(f"{host}: empty")
+                empty_hosts.append(f"{host}: empty")
                 continue
             return payload
         except Exception as exc:
-            host = endpoint.split("/")[2]
             errors.append(f"{host}: {type(exc).__name__}")
-            if deadline - time.perf_counter() > 0.3:
-                time.sleep(0.2)
-    if empty_payload is not None:
+            time.sleep(0.2)
+    if empty_payload is not None and not errors:
         return empty_payload
     raise RuntimeError(
         "OpenStreetMap/Overpass no respondió a tiempo. "
         "Las demás fuentes pueden seguir funcionando. "
-        f"Intentos: {', '.join(errors)}"
+        f"Intentos: {', '.join([*errors, *empty_hosts]) if errors or empty_hosts else 'sin respuesta'}"
     )
 
 
@@ -503,14 +498,12 @@ def haversine_m(lat1, lon1, lat2, lon2):
     return 2*r*math.asin(math.sqrt(a))
 
 
-def query_built_assets(
+def build_asset_overpass_query(
     lat: float,
     lon: float,
     radius_m: int,
     selected_types: List[str],
-    timeout: int | None = None,
-) -> List[Dict[str, Any]]:
-    timeout = timeout or source_config("osm_overpass")["timeout"]
+) -> str:
     clauses = []
     for key in selected_types:
         cfg = ASSET_TYPES.get(key)
@@ -519,14 +512,14 @@ def query_built_assets(
                 clauses.append(f'{osm_type}{cfg["query"]}(around:{int(radius_m)},{lat},{lon});')
 
     if not clauses:
-        return []
+        return ""
 
-    query = f"[out:json][timeout:{timeout}];(" + "".join(clauses) + ");out center tags;"
-    payload = _overpass(query, timeout=timeout, require_nonempty=True)
+    return f"[out:json];(" + "".join(clauses) + ");out center tags;"
 
+
+def normalize_built_asset_elements(elements: List[Dict[str, Any]], selected_types: List[str]) -> List[Dict[str, Any]]:
     results = []
-    raw_count = len(payload.get("elements") or [])
-    for el in payload.get("elements") or []:
+    for el in elements:
         tags = el.get("tags") or {}
         if "lat" in el and "lon" in el:
             plat, plon = el["lat"], el["lon"]
@@ -566,11 +559,51 @@ def query_built_assets(
             "osm_id": el.get("id"),
         })
 
-    print(
-        f"[SOURCE: OSM_POI] raw={raw_count} normalized={raw_count} "
-        f"matching={len(results)} stored={len(results)} requested_types={','.join(selected_types)}"
-    )
     return results
+
+
+def built_asset_pipeline_from_payload(payload: Dict[str, Any], selected_types: List[str]) -> Dict[str, Any]:
+    elements = payload.get("elements") or []
+    results = normalize_built_asset_elements(elements, selected_types)
+    pipeline = {
+        "raw": len(elements),
+        "normalized": len(elements),
+        "matching": len(results),
+        "stored": len(results),
+        "rendered": 0,
+    }
+    return {"items": results, "count": len(results), "pipeline": pipeline}
+
+
+def query_built_assets_with_audit(
+    lat: float,
+    lon: float,
+    radius_m: int,
+    selected_types: List[str],
+    timeout: int | None = None,
+) -> Dict[str, Any]:
+    timeout = timeout or source_config("osm_overpass")["timeout"]
+    query = build_asset_overpass_query(lat, lon, radius_m, selected_types)
+    if not query:
+        return {"items": [], "count": 0, "pipeline": {"raw": 0, "normalized": 0, "matching": 0, "stored": 0, "rendered": 0}}
+    timed_query = query.replace("[out:json];", f"[out:json][timeout:{timeout}];", 1)
+    payload = _overpass(timed_query, timeout=timeout, require_nonempty=True)
+    result = built_asset_pipeline_from_payload(payload, selected_types)
+    print(
+        f"[SOURCE: OSM_POI] raw={result['pipeline']['raw']} normalized={result['pipeline']['normalized']} "
+        f"matching={result['pipeline']['matching']} stored={result['pipeline']['stored']} requested_types={','.join(selected_types)}"
+    )
+    return result
+
+
+def query_built_assets(
+    lat: float,
+    lon: float,
+    radius_m: int,
+    selected_types: List[str],
+    timeout: int | None = None,
+) -> List[Dict[str, Any]]:
+    return query_built_assets_with_audit(lat, lon, radius_m, selected_types, timeout=timeout)["items"]
 
 
 def query_osm_construction(lat: float, lon: float, radius_m: int, timeout: int | None = None) -> List[Dict[str, Any]]:

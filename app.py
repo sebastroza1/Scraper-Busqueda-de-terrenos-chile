@@ -2,14 +2,12 @@ from __future__ import annotations
 
 import json
 import math
-import re
 import time
 from datetime import datetime
 from typing import Any
 
 import folium
 import pandas as pd
-import requests
 import streamlit as st
 from branca.element import MacroElement, Template
 from folium.plugins import Fullscreen, MarkerCluster
@@ -17,12 +15,26 @@ from streamlit_folium import st_folium
 
 from landfinder.basemaps import basemap_for_theme
 from landfinder.config import USER_AGENT, source_config
-from landfinder.filter_model import build_source_plan
+from landfinder.filter_model import build_source_plan, renderable_area_geometries
+from landfinder.geocoder import (
+    geocode_address as geocode_address_structured,
+    parse_coordinates as parse_coordinates_structured,
+    requested_house_number as requested_house_number_structured,
+)
 from landfinder.icons import legend_symbol_html, marker_icon
 from landfinder.map_engine import load_map_source
 from landfinder.metro_adapter import metro_area_summary, metro_current_for_area, metro_dataset_status, metro_future_for_area
-from landfinder.persistent_cache import read_persistent_cache, write_persistent_cache
+from landfinder.persistent_cache import (
+    CACHE_SCHEMA_VERSION,
+    cache_age_seconds,
+    cache_digest,
+    cache_payload_is_valid,
+    delete_persistent_cache,
+    read_persistent_cache,
+    write_persistent_cache,
+)
 from landfinder.probes import health_state, probe_source
+from landfinder.progress import progress_summary, source_progress
 from landfinder.registry import load_sources
 from landfinder.runtime_sources import provider_key_for
 from landfinder.source_states import (
@@ -35,7 +47,6 @@ from landfinder.source_states import (
     STALE,
     SUCCESS_DATA,
     SUCCESS_EMPTY,
-    TERMINAL_STATES,
     TIMEOUT,
     VISUAL_ONLY,
     classify_runtime_error,
@@ -43,13 +54,14 @@ from landfinder.source_states import (
     source_result_count,
 )
 from landfinder.storage import load_history, save_result
+from landfinder.summaries import land_use_summary_value, result_pipeline_counts
 from landfinder.urban_value import (
     ASSET_TYPES,
     CURRENT_LINE_ORDER,
     FUTURE_LINE_ORDER,
     METRO_COLORS,
     haversine_m,
-    query_built_assets,
+    query_built_assets_with_audit,
     query_osm_construction,
 )
 
@@ -59,40 +71,6 @@ SOURCE_BY_ID = {source["id"]: source for source in SOURCES}
 
 AREA_COLORS = ["#1473E6", "#16A36A", "#E74C5B", "#8E44AD", "#F39C12"]
 SANTIAGO_CENTER = (-33.4489, -70.6693)
-RM_BOUNDS = {
-    "south": -33.95,
-    "north": -33.05,
-    "west": -71.25,
-    "east": -70.10,
-}
-
-COMMUNE_GAZETTEER = {
-    "santiago": (-33.4489, -70.6693, 12),
-    "nunoa": (-33.4569, -70.5978, 13),
-    "ñuñoa": (-33.4569, -70.5978, 13),
-    "providencia": (-33.4263, -70.6170, 13),
-    "las condes": (-33.4088, -70.5674, 12),
-    "vitacura": (-33.4001, -70.5980, 12),
-    "la reina": (-33.4478, -70.5345, 12),
-    "macul": (-33.4850, -70.5992, 12),
-    "san miguel": (-33.5007, -70.6514, 13),
-    "estacion central": (-33.4628, -70.6998, 13),
-    "estación central": (-33.4628, -70.6998, 13),
-    "quinta normal": (-33.4297, -70.6992, 13),
-    "renca": (-33.4066, -70.7283, 12),
-    "cerrillos": (-33.5024, -70.7163, 12),
-    "maipu": (-33.5108, -70.7562, 12),
-    "maipú": (-33.5108, -70.7562, 12),
-    "la florida": (-33.5227, -70.5982, 12),
-    "puente alto": (-33.6117, -70.5758, 12),
-}
-
-ADDRESS_FALLBACKS = {
-    "santa raquel 8204": (-33.5623, -70.60053, 16, "Santa Raquel 8204, La Florida, Santiago"),
-    "av santa raquel 8204": (-33.5623, -70.60053, 16, "Santa Raquel 8204, La Florida, Santiago"),
-    "avenida santa raquel 8204": (-33.5623, -70.60053, 16, "Santa Raquel 8204, La Florida, Santiago"),
-}
-
 TERRITORY_LAYER_IDS = [
     "minvu_limites_urbanos",
     "minvu_prms_uso_suelo",
@@ -545,6 +523,49 @@ div[data-testid="stAlert"] * {
   font-size:12px;
 }
 
+.lf-source-pipeline {
+  color:#91A4BC;
+  font-size:11px;
+}
+
+.lf-progress-card {
+  background:#0D1726;
+  border:1px solid #24537D;
+  border-radius:8px;
+  padding:10px 12px;
+  margin:0 0 8px;
+  box-shadow:0 12px 24px rgba(0,0,0,.22);
+}
+
+.lf-progress-top {
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:12px;
+  color:#EAF2FF;
+  font-size:13px;
+}
+
+.lf-progress-track {
+  width:100%;
+  height:9px;
+  border-radius:999px;
+  background:#1E314A;
+  overflow:hidden;
+  margin:8px 0 6px;
+}
+
+.lf-progress-fill {
+  height:100%;
+  background:#1473E6;
+  border-radius:999px;
+}
+
+.lf-progress-meta {
+  color:#BFD1E8;
+  font-size:12px;
+}
+
 .lf-next {
   background:#0D1726;
   border:1px dashed #344B66;
@@ -666,210 +687,25 @@ def normalize_query(text: str) -> str:
 
 
 def parse_coordinates(text: str) -> tuple[float, float] | None:
-    cleaned = text.replace(";", ",").replace(" ", "")
-    if "," not in cleaned:
-        return None
-    parts = cleaned.split(",", 1)
-    try:
-        lat = float(parts[0])
-        lon = float(parts[1])
-    except ValueError:
-        return None
-    if -56 <= lat <= -17 and -76 <= lon <= -66:
-        return lat, lon
-    return None
-
-
-def looks_like_address(text: str) -> bool:
-    key = normalize_query(text)
-    street_tokens = [
-        "av.",
-        "avenida",
-        "calle",
-        "pasaje",
-        "camino",
-        "ruta",
-        "autopista",
-        "pje",
-        "los ",
-        "las ",
-    ]
-    return any(char.isdigit() for char in key) or any(token in key for token in street_tokens)
-
-
-def in_rm_bounds(lat: float, lon: float) -> bool:
-    return (
-        RM_BOUNDS["south"] <= lat <= RM_BOUNDS["north"]
-        and RM_BOUNDS["west"] <= lon <= RM_BOUNDS["east"]
-    )
+    return parse_coordinates_structured(text)
 
 
 def requested_house_number(text: str) -> str | None:
-    match = re.search(r"\b(\d{2,6})\b", text)
-    return match.group(1) if match else None
-
-
-def geocode_record(
-    query: str,
-    lat: float,
-    lon: float,
-    zoom: int,
-    display_name: str,
-    *,
-    source: str,
-    address: dict[str, Any] | None = None,
-    fallback_exact: bool = False,
-    raw: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    normalized_query = normalize_query(query)
-    normalized_display = normalize_query(display_name)
-    address = address or {}
-    requested_number = requested_house_number(query)
-    found_number = str(address.get("house_number") or "")
-    house_number_matched = bool(
-        fallback_exact or (requested_number and found_number and requested_number == found_number)
-    )
-    street_value = " ".join(
-        str(address.get(key) or "")
-        for key in ("road", "pedestrian", "footway", "suburb", "neighbourhood")
-    )
-    street_matched = any(
-        token and token in normalize_query(street_value or display_name)
-        for token in ("santa raquel", "irrarazaval", "providencia", "apoquindo")
-        if token in normalized_query
-    )
-    if fallback_exact and any(token in normalized_display for token in normalized_query.split() if not token.isdigit()):
-        street_matched = True
-    commune_value = str(address.get("city") or address.get("town") or address.get("municipality") or address.get("county") or "")
-    commune_matched = any(
-        normalize_query(commune) in normalized_display or normalize_query(commune) in normalize_query(commune_value)
-        for commune in COMMUNE_GAZETTEER
-        if normalize_query(commune) in normalized_query
-    )
-    if requested_number:
-        precision = "exact" if house_number_matched else "approximate"
-    elif street_matched:
-        precision = "street"
-    elif commune_matched:
-        precision = "commune"
-    else:
-        precision = "unknown"
-    confidence = "alta" if precision == "exact" else "media" if precision in {"street", "commune"} else "baja"
-    return {
-        "query": query,
-        "display_name": display_name,
-        "lat": float(lat),
-        "lon": float(lon),
-        "zoom": int(zoom),
-        "precision": precision,
-        "confidence": confidence,
-        "source": source,
-        "house_number_requested": requested_number,
-        "house_number_matched": house_number_matched,
-        "street_matched": bool(street_matched),
-        "commune_matched": bool(commune_matched),
-        "raw": raw or {},
-    }
+    return requested_house_number_structured(text)
 
 
 @st.cache_data(ttl=60 * 60 * 24, show_spinner=False)
 def geocode_address(text: str) -> dict[str, Any] | None:
-    raw_query = text.strip()
-    if not raw_query:
-        return None
-    normalized = normalize_query(raw_query)
-    for key, fallback in ADDRESS_FALLBACKS.items():
-        if key in normalized:
-            return geocode_record(
-                raw_query,
-                fallback[0],
-                fallback[1],
-                fallback[2],
-                fallback[3],
-                source="fallback_local_verificado",
-                fallback_exact=True,
-            )
-    address_query = looks_like_address(raw_query)
-    queries = [raw_query]
-    if address_query and not any(normalize_query(name) in normalized for name in COMMUNE_GAZETTEER):
-        queries = [
-            f"{raw_query}, La Florida, Santiago, Chile",
-            f"{raw_query}, Santiago, Región Metropolitana, Chile",
-            f"{raw_query}, Región Metropolitana, Chile",
-            raw_query,
-        ]
-    queries = [query if "chile" in normalize_query(query) else f"{query}, Chile" for query in queries]
-
-    candidates: list[dict[str, Any]] = []
     try:
-        for query in queries:
-            params: dict[str, Any] = {
-                "q": query,
-                "format": "jsonv2",
-                "limit": 5,
-                "countrycodes": "cl",
-                "addressdetails": 1,
-            }
-            if address_query:
-                params.update(
-                    {
-                        "bounded": 1,
-                        "viewbox": f"{RM_BOUNDS['west']},{RM_BOUNDS['north']},{RM_BOUNDS['east']},{RM_BOUNDS['south']}",
-                    }
-                )
-            response = requests.get(
-                "https://nominatim.openstreetmap.org/search",
-                params=params,
-                timeout=8,
-                headers={"User-Agent": USER_AGENT, "Accept": "application/json"},
-            )
-            response.raise_for_status()
-            for result in response.json():
-                try:
-                    lat = float(result["lat"])
-                    lon = float(result["lon"])
-                except (KeyError, TypeError, ValueError):
-                    continue
-                if address_query and not in_rm_bounds(lat, lon):
-                    continue
-                label = result.get("display_name") or raw_query
-                candidates.append(
-                    geocode_record(
-                        raw_query,
-                        lat,
-                        lon,
-                        16 if address_query else 13,
-                        label,
-                        source="nominatim",
-                        address=result.get("address") or {},
-                        raw=result,
-                    )
-                )
-            if candidates:
-                break
+        result = geocode_address_structured(text)
     except Exception:
         return None
-    candidates.sort(key=lambda item: (item["precision"] != "exact", item["precision"] != "street"))
-    selected = candidates[0] if candidates else None
-    if selected:
-        selected["candidates"] = candidates[:5]
-    return selected
+    if not result or result.get("precision") == "NOT_FOUND" or result.get("lat") is None or result.get("lon") is None:
+        return None
+    return result
 
 
 def resolve_search_structured(text: str) -> dict[str, Any] | None:
-    coords = parse_coordinates(text)
-    if coords:
-        return geocode_record(text, coords[0], coords[1], 15, "coordenadas", source="coordinates", fallback_exact=True)
-
-    if looks_like_address(text):
-        geocoded = geocode_address(text)
-        if geocoded:
-            return geocoded
-
-    key = normalize_query(text)
-    for name, (lat, lon, zoom) in COMMUNE_GAZETTEER.items():
-        if normalize_query(name) in key or key in normalize_query(name):
-            return geocode_record(text, lat, lon, zoom, name.title(), source="commune_gazetteer")
     return geocode_address(text)
 
 
@@ -988,10 +824,20 @@ def render_theme_overrides() -> None:
           background: var(--lf-primary-hover) !important;
           border-color: var(--lf-primary-hover) !important;
         }
-        .lf-source-state, .lf-next {
+        .lf-source-state, .lf-next, .lf-progress-card {
           background: var(--lf-panel-2) !important;
           color: var(--lf-ink) !important;
           border-color: var(--lf-line) !important;
+        }
+        .lf-progress-top, .lf-progress-top * {
+          color: var(--lf-ink) !important;
+        }
+        .lf-progress-track {
+          background:#DCE8F6 !important;
+        }
+        .lf-progress-meta,
+        .lf-source-pipeline {
+          color: var(--lf-muted) !important;
         }
         .lf-map-hint,
         .lf-area-row {
@@ -1356,15 +1202,6 @@ def risk_summary_value(bundle: dict[str, Any]) -> str:
     return "Sin riesgos detectados" if count == 0 else f"{count} alertas"
 
 
-def source_progress(bundle: dict[str, Any]) -> tuple[int, int, float]:
-    states = list((bundle.get("layer_states") or {}).values())
-    total = len(states)
-    if total == 0:
-        return 0, 0, 0.0
-    done = sum(1 for state in states if normalize_status(state.get("status"), state.get("count")) in TERMINAL_STATES)
-    return done, total, done / total
-
-
 def terrain_filter_count() -> int:
     filters = st.session_state.filters
     active = 0
@@ -1537,7 +1374,11 @@ def run_source(
     cfg = cfg or source_config(SOURCE_BY_ID.get(source_id, source_id))
     key = cache_key_for(area, source_id, params)
     circuit_key = provider_key_for(source_id, SOURCE_BY_ID)
-    cached = st.session_state.source_cache.get(key) or read_persistent_cache(key)
+    cached = st.session_state.source_cache.get(key)
+    if cached and not cache_payload_is_valid(cached):
+        st.session_state.source_cache.pop(key, None)
+        cached = None
+    cached = cached or read_persistent_cache(key)
     if cached:
         st.session_state.source_cache[key] = cached
     ttl = int(cfg.get("cache_ttl_seconds", 0) or 0)
@@ -1546,7 +1387,17 @@ def run_source(
         result = cached["value"]
         count = cached.get("count")
         set_source_status(source_id, "cache_hit", 0, count, "HIT")
-        state = {"status": SUCCESS_DATA if (count or 0) > 0 else SUCCESS_EMPTY, "count": count, "error": None, "duration_ms": 0, "cache": "HIT"}
+        state = {
+            "status": SUCCESS_DATA if (count or 0) > 0 else SUCCESS_EMPTY,
+            "count": count,
+            "error": None,
+            "duration_ms": 0,
+            "cache": "HIT",
+            "cache_key": key,
+            "cache_digest": cache_digest(key),
+            "cache_age_seconds": cache_age_seconds(cached, now),
+            "pipeline": (result or {}).get("pipeline") if isinstance(result, dict) else None,
+        }
         return result, state
     if cached:
         set_source_status(source_id, "refreshing", 0, cached.get("count"), "STALE")
@@ -1555,7 +1406,16 @@ def run_source(
         count = cached.get("count") if cached else None
         if cached:
             set_source_status(source_id, "circuit_open_cache", 0, count, "STALE")
-            state = {"status": STALE, "count": count, "error": None, "duration_ms": 0, "cache": "STALE"}
+            state = {
+                "status": STALE,
+                "count": count,
+                "error": None,
+                "duration_ms": 0,
+                "cache": "STALE",
+                "cache_key": key,
+                "cache_digest": cache_digest(key),
+                "cache_age_seconds": cache_age_seconds(cached, now),
+            }
             return cached["value"], state
         error = "Fuente pausada temporalmente por fallos repetidos. Reintenta más tarde."
         set_source_status(source_id, "circuit_open", 0, None, "MISS", error)
@@ -1571,6 +1431,9 @@ def run_source(
             "stored_at": now,
             "count": count,
             "lastUpdated": datetime.now().isoformat(timespec="seconds"),
+            "schema_version": CACHE_SCHEMA_VERSION,
+            "source_id": source_id,
+            "params": params,
         }
         st.session_state.source_cache[key] = cached_payload
         if count is not None:
@@ -1583,6 +1446,10 @@ def run_source(
             "error": None,
             "duration_ms": duration_ms,
             "cache": "MISS",
+            "cache_key": key,
+            "cache_digest": cache_digest(key),
+            "cache_age_seconds": 0,
+            "pipeline": result.get("pipeline") if isinstance(result, dict) else None,
         }
         return result, state
     except Exception as exc:
@@ -1599,6 +1466,9 @@ def run_source(
                 "error": error,
                 "duration_ms": duration_ms,
                 "cache": "STALE",
+                "cache_key": key,
+                "cache_digest": cache_digest(key),
+                "cache_age_seconds": cache_age_seconds(cached, now),
             }
         set_source_status(source_id, "timeout" if status == TIMEOUT else "error", duration_ms, None, "MISS", error)
         return None, {"status": status, "count": None, "error": error, "duration_ms": duration_ms, "cache": "MISS"}
@@ -1648,7 +1518,7 @@ def add_area_circle(map_obj: folium.Map, area: dict[str, Any], active: bool = Fa
 
 def add_location_marker(map_obj: folium.Map, location: dict[str, Any], area_name: str | None = None) -> None:
     precision = location.get("precision") or "unknown"
-    label = "Ubicación encontrada" if precision == "exact" else "Ubicación aproximada"
+    label = "Ubicación encontrada" if precision == "EXACT" else "Ubicación aproximada"
     if area_name:
         label = f"{label} · {area_name}"
     folium.Marker(
@@ -1662,6 +1532,29 @@ def add_location_marker(map_obj: folium.Map, location: dict[str, Any], area_name
             f"Número coincidente: {'sí' if location.get('house_number_matched') else 'no'}"
         ),
     ).add_to(map_obj)
+
+
+def render_map_progress_card(area: dict[str, Any] | None) -> None:
+    if not area:
+        return
+    bundle = st.session_state.map_bundle.get(area["id"], {})
+    if not bundle:
+        return
+    summary = progress_summary(bundle)
+    if not summary["total"]:
+        return
+    label = "Análisis completado" if summary["complete"] else f"Analizando {area['name']}"
+    warning_text = f"{summary['warnings']} con advertencias" if summary["warnings"] else "sin advertencias"
+    st.markdown(
+        f"""
+        <div class="lf-progress-card">
+          <div class="lf-progress-top"><b>{label}</b><span>{summary['done']} / {summary['total']}</span></div>
+          <div class="lf-progress-track"><div class="lf-progress-fill" style="width:{summary['ratio'] * 100:.1f}%"></div></div>
+          <div class="lf-progress-meta">{summary['total']} fuentes · {summary['duration_ms'] / 1000:.1f} s · {warning_text}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 def add_metro_line(map_obj: folium.Map, line: dict[str, Any], future: bool = False) -> None:
@@ -1679,14 +1572,9 @@ def add_metro_line(map_obj: folium.Map, line: dict[str, Any], future: bool = Fal
             tooltip=label,
         ).add_to(group)
     for station in line.get("stations") or []:
-        folium.CircleMarker(
+        folium.Marker(
             [station["lat"], station["lon"]],
-            radius=4 if not future else 5,
-            color=color,
-            weight=2,
-            fill=True,
-            fill_color="#FFFFFF" if not future else color,
-            fill_opacity=1,
+            icon=marker_icon("metro_future" if future else "metro_station", 28 if not future else 30),
             tooltip=f"{station.get('name')} · {ref}",
         ).add_to(group)
     group.add_to(map_obj)
@@ -1735,7 +1623,7 @@ def add_geojson_result(map_obj: folium.Map, label: str, result: dict[str, Any], 
     )
 
 
-def legend_html(snapshot: dict[str, Any]) -> str:
+def legend_html(snapshot: dict[str, Any], dark: bool) -> str:
     items = []
     for asset_type in snapshot.get("built") or []:
         cfg = ASSET_TYPES.get(asset_type)
@@ -1762,7 +1650,7 @@ def legend_html(snapshot: dict[str, Any]) -> str:
         return ""
 
     rows = []
-    for color_or_key, label, kind in items[:14]:
+    for color_or_key, label, kind in items[:18]:
         if kind == "line":
             color = color_or_key
             symbol = f"<span style='display:inline-block;width:22px;border-top:4px solid {color};'></span>"
@@ -1777,14 +1665,19 @@ def legend_html(snapshot: dict[str, Any]) -> str:
         else:
             color = color_or_key
             symbol = f"<span style='display:inline-block;width:10px;height:10px;background:{color};border-radius:50%;'></span>"
-        rows.append(f"<span style='display:inline-flex;align-items:center;gap:6px;margin-right:12px;'>{symbol}{label}</span>")
+        rows.append(f"<span style='display:inline-flex;align-items:center;gap:6px;margin:4px 10px 4px 0;'>{symbol}{label}</span>")
 
+    bg = "#0D1726" if dark else "#FFFFFF"
+    border = "#24364D" if dark else "#D9E5F2"
+    text = "#EAF2FF" if dark else "#123A5F"
     return f"""
-    <div style="position:absolute;left:22px;bottom:18px;z-index:9999;background:white;
-                border:1px solid #D9E5F2;border-radius:8px;padding:9px 12px;
-                box-shadow:0 8px 24px rgba(9,33,59,.16);font-size:12px;color:#123A5F;">
-      {''.join(rows)}
-    </div>
+    <details open style="position:absolute;left:18px;bottom:18px;z-index:9999;background:{bg};
+                border:1px solid {border};border-radius:8px;padding:8px 10px;
+                box-shadow:0 8px 24px rgba(9,33,59,.18);font-size:12px;color:{text};
+                max-width:min(520px,calc(100% - 44px));max-height:168px;overflow:auto;">
+      <summary style="cursor:pointer;font-weight:850;margin-bottom:4px;color:{text};">Leyenda</summary>
+      <div style="display:flex;flex-wrap:wrap;align-items:center;">{''.join(rows)}</div>
+    </details>
     """
 
 
@@ -1849,6 +1742,8 @@ def state_from_map_result(result: dict[str, Any], runtime_state: dict[str, Any])
     state["status"] = result.get("status", state.get("status"))
     state["count"] = result.get("count", state.get("count"))
     state["error"] = result.get("error", state.get("error"))
+    if result.get("pipeline"):
+        state["pipeline"] = result.get("pipeline")
     return state
 
 
@@ -1885,7 +1780,7 @@ def query_area(area: dict[str, Any], snapshot: dict[str, Any], request_id: str |
                 f"built_{asset_type}",
                 {"type": asset_type},
                 area,
-                lambda asset_type=asset_type: query_built_assets(
+                lambda asset_type=asset_type: query_built_assets_with_audit(
                     area["lat"],
                     area["lon"],
                     area["radius_m"],
@@ -1896,8 +1791,11 @@ def query_area(area: dict[str, Any], snapshot: dict[str, Any], request_id: str |
             )
             if not request_is_current():
                 return bundle
-            bundle["assets"].extend(result or [])
-            bundle["layer_states"][f"built_{asset_type}"] = state
+            items = (result or {}).get("items") if isinstance(result, dict) else (result or [])
+            bundle["assets"].extend(items or [])
+            pipeline = dict((state.get("pipeline") or {}))
+            pipeline["rendered"] = len(items or []) if asset_type in source_plan["built_visual_types"] else 0
+            bundle["layer_states"][f"built_{asset_type}"] = {**state, "pipeline": pipeline}
         visual_types = set(source_plan["built_visual_types"])
         bundle["visual_assets"] = [item for item in bundle["assets"] if item.get("type") in visual_types]
         print(
@@ -2249,7 +2147,7 @@ def render_left_panel(area: dict[str, Any] | None) -> None:
                         lat = resolved_area["lat"]
                         lon = resolved_area["lon"]
                         sector = compact_place_label(resolved_area["display_name"], 72)
-                        if resolved_area["precision"] != "exact" and resolved_area.get("house_number_requested"):
+                        if resolved_area["precision"] != "EXACT" and resolved_area.get("house_number_requested"):
                             st.warning(f"Ubicación aproximada: no fue posible localizar exactamente el número {resolved_area['house_number_requested']}.")
                     st.session_state.areas.append(
                         {
@@ -2427,6 +2325,9 @@ def render_map() -> None:
               background: {'#08111F' if dark_controls else '#F4F8FC'};
               font-family: Inter, Segoe UI, Arial, sans-serif;
             }}
+            .leaflet-tile-pane {{
+              filter: {basemap.css_filter if basemap.css_filter else 'none'};
+            }}
             .leaflet-control-layers,
             .leaflet-bar a,
             .leaflet-popup-content-wrapper,
@@ -2465,7 +2366,7 @@ def render_map() -> None:
     )
     CenterSantiagoControl(SANTIAGO_CENTER[0], SANTIAGO_CENTER[1], 11).add_to(map_obj)
 
-    for area_item in st.session_state.areas:
+    for area_item in renderable_area_geometries(st.session_state.areas):
         add_area_circle(map_obj, area_item, active=area_item["id"] == st.session_state.active_area_id)
 
     last_location = st.session_state.get("last_search_location")
@@ -2539,7 +2440,7 @@ def render_map() -> None:
             if source_id in visible_risks:
                 add_geojson_result(map_obj, source_label(source_id), result, "#E74C5B")
 
-    legend = legend_html(st.session_state.last_applied_layers)
+    legend = legend_html(st.session_state.last_applied_layers, dark=dark_controls)
     if legend:
         map_obj.get_root().html.add_child(folium.Element(legend))
 
@@ -2608,7 +2509,7 @@ def render_summary_panel(area: dict[str, Any] | None) -> None:
         rows = [
             ("Área", f"{area['name']} · {compact_place_label(area['sector'], 34)}"),
             ("Superficie", f"{area_surface_km2(area):.1f} km2"),
-            ("Uso de suelo", "Pendiente de fuente"),
+            ("Uso de suelo", land_use_summary_value(bundle)),
             ("Metro cercano", metro_value),
             ("Riesgos", risk_value),
             ("Equipamiento", count_summary_value(bundle, "assets", [f"built_{asset_type}" for asset_type in ASSET_TYPES])),
@@ -2652,10 +2553,22 @@ def render_summary_panel(area: dict[str, Any] | None) -> None:
         if not bundle:
             st.caption("Aplica filtros para consultar fuentes.")
         else:
-            done, total, ratio = source_progress(bundle)
-            if total:
-                st.progress(ratio, text=f"Consultando fuentes del {area['name']}: {done} de {total} completadas")
+            summary = progress_summary(bundle)
+            if summary["total"]:
+                label = "Análisis completado" if summary["complete"] else f"Analizando {area['name']}"
+                warning_text = f"{summary['warnings']} con advertencias" if summary["warnings"] else "sin advertencias"
+                st.markdown(
+                    f"""
+                    <div class="lf-progress-card">
+                      <div class="lf-progress-top"><b>{label}</b><span>{summary['done']} / {summary['total']}</span></div>
+                      <div class="lf-progress-track"><div class="lf-progress-fill" style="width:{summary['ratio'] * 100:.1f}%"></div></div>
+                      <div class="lf-progress-meta">{summary['total']} fuentes · {summary['duration_ms'] / 1000:.1f} s · {warning_text}</div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
             retryable = []
+            retry_options = []
             for layer_id, result in (bundle.get("layer_states") or {}).items():
                 label = LAYER_DISPLAY_NAMES.get(
                     layer_id.removeprefix("built_") if layer_id.startswith("built_") else layer_id,
@@ -2666,8 +2579,23 @@ def render_summary_panel(area: dict[str, Any] | None) -> None:
                 status = normalize_status(result.get("status"), result.get("count"))
                 if status in FAILURE_STATES:
                     retryable.append(layer_id)
+                retry_options.append((layer_id, label))
+                pipeline = result.get("pipeline") or {}
+                cache_bits = []
+                if result.get("cache_digest"):
+                    cache_bits.append(f"cache {str(result.get('cache_digest'))[:10]}")
+                if isinstance(result.get("cache_age_seconds"), (int, float)):
+                    cache_bits.append(f"{result['cache_age_seconds'] / 60:.0f} min")
+                pipeline_text = ""
+                if pipeline:
+                    pipeline_text = (
+                        f"<br><span class='lf-source-pipeline'>raw={pipeline.get('raw', 0)} · "
+                        f"norm={pipeline.get('normalized', 0)} · match={pipeline.get('matching', result.get('count') or 0)} · "
+                        f"render={pipeline.get('rendered', 0)}</span>"
+                    )
+                cache_text = f"<br><span class='lf-source-pipeline'>{' · '.join(cache_bits)}</span>" if cache_bits else ""
                 st.markdown(
-                    f"<div class='lf-source-state'><b>{label}</b><br>{status_text(result)}</div>",
+                    f"<div class='lf-source-state'><b>{label}</b><br>{status_text(result)}{pipeline_text}{cache_text}</div>",
                     unsafe_allow_html=True,
                 )
                 if result.get("error") and st.session_state.get("mode") == "Admin/API":
@@ -2677,10 +2605,28 @@ def render_summary_panel(area: dict[str, Any] | None) -> None:
                     matching = [key for key in st.session_state.source_cache if f'"source": "{layer_id}"' in key]
                     for key in matching:
                         st.session_state.source_cache.pop(key, None)
+                        delete_persistent_cache(key)
                     circuit_key = provider_key_for(layer_id, SOURCE_BY_ID)
                     st.session_state.source_circuits.pop(circuit_key, None)
                 st.session_state.pending_filter_apply = True
                 st.rerun()
+            if retry_options:
+                option_ids = [item[0] for item in retry_options]
+                selected_retry = st.selectbox(
+                    "Fuente a reintentar",
+                    option_ids,
+                    format_func=lambda item_id: dict(retry_options).get(item_id, item_id),
+                )
+                if st.button("Reintentar fuente seleccionada", use_container_width=True):
+                    state = (bundle.get("layer_states") or {}).get(selected_retry) or {}
+                    key = state.get("cache_key")
+                    if key:
+                        st.session_state.source_cache.pop(key, None)
+                        delete_persistent_cache(key)
+                    circuit_key = provider_key_for(selected_retry, SOURCE_BY_ID)
+                    st.session_state.source_circuits.pop(circuit_key, None)
+                    st.session_state.pending_filter_apply = True
+                    st.rerun()
 
 
 def render_compare_panel() -> None:
@@ -2858,7 +2804,7 @@ with top_search:
                 st.toast(message)
             else:
                 st.success(message)
-            if resolved["precision"] != "exact" and resolved.get("house_number_requested"):
+            if resolved["precision"] != "EXACT" and resolved.get("house_number_requested"):
                 st.warning(f"Ubicación aproximada: no fue posible localizar exactamente el número {resolved['house_number_requested']}.")
         else:
             st.warning("No encontré esa ubicación. Prueba agregar comuna/ciudad, por ejemplo `Av. Irarrázaval 2401, Ñuñoa`, o usa coordenadas `lat,lng`.")
@@ -2895,6 +2841,7 @@ with center:
             "<div class='lf-map-hint'>Sin áreas todavía. Usa + Nueva área o busca una dirección para ubicarte.</div>",
             unsafe_allow_html=True,
         )
+    render_map_progress_card(current_area)
     render_map()
 
 with right:

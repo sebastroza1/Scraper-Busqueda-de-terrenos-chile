@@ -12,7 +12,7 @@ DEFAULT_TIMEOUT = 10
 SOURCE_CONFIG = {
     "default": {"timeout": 10, "retries": 0, "cache_ttl_seconds": 900, "circuit_failures": 3, "circuit_cooldown_seconds": 180},
     "metro_static": {"timeout": 2, "retries": 0, "cache_ttl_seconds": 3600, "circuit_failures": 2, "circuit_cooldown_seconds": 120},
-    "osm_overpass": {"timeout": 10, "retries": 0, "cache_ttl_seconds": 900, "circuit_failures": 3, "circuit_cooldown_seconds": 180},
+    "osm_overpass": {"timeout": 16, "retries": 0, "cache_ttl_seconds": 900, "circuit_failures": 3, "circuit_cooldown_seconds": 180},
     "arcgis": {"timeout": 10, "retries": 0, "cache_ttl_seconds": 900, "circuit_failures": 3, "circuit_cooldown_seconds": 180},
     "wfs": {"timeout": 10, "retries": 0, "cache_ttl_seconds": 900, "circuit_failures": 3, "circuit_cooldown_seconds": 180},
     "wms": {"timeout": 8, "retries": 0, "cache_ttl_seconds": 900, "circuit_failures": 3, "circuit_cooldown_seconds": 180},

@@ -56,7 +56,7 @@ def classify_runtime_error(error: str | None) -> str:
     text = (error or "").lower()
     if "429" in text or "rate limit" in text or "too many requests" in text:
         return RATE_LIMITED
-    if "timeout" in text or "timed out" in text or "demor" in text:
+    if "timeout" in text or "timed out" in text or "demor" in text or "tiempo" in text:
         return TIMEOUT
     return ERROR
 

@@ -26,6 +26,41 @@ def visible_area_ids(areas: list[dict[str, Any]]) -> list[str]:
     return [area["id"] for area in areas if area.get("visible", True)]
 
 
+def renderable_area_geometries(areas: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    geometries = []
+    for area in areas:
+        if not area.get("visible", True):
+            continue
+        geometries.append(
+            {
+                "id": area.get("id"),
+                "name": area.get("name"),
+                "sector": area.get("sector") or "",
+                "geometry_type": area.get("geometry_type") or "circle",
+                "lat": float(area["lat"]),
+                "lon": float(area["lon"]),
+                "radius_m": int(area.get("radius_m") or 0),
+                "color": area.get("color"),
+                "search_location": area.get("search_location"),
+            }
+        )
+    return geometries
+
+
+def overlay_signature(snapshot: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "built": tuple(snapshot.get("built") or []),
+        "metro_current": bool(snapshot.get("metro_current")),
+        "metro_future": bool(snapshot.get("metro_future")),
+        "road_network": bool(snapshot.get("road_network")),
+        "osm_construction": bool(snapshot.get("osm_construction")),
+        "seia": bool(snapshot.get("seia")),
+        "mop": bool(snapshot.get("mop")),
+        "territory": tuple(snapshot.get("territory") or []),
+        "risks": tuple(snapshot.get("risks") or []),
+    }
+
+
 def active_area_record(areas: list[dict[str, Any]], active_area_id: str | None) -> dict[str, Any] | None:
     for area in areas:
         if area.get("id") == active_area_id:

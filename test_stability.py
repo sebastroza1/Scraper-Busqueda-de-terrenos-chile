@@ -10,7 +10,8 @@ import requests
 
 from landfinder.basemaps import basemap_for_theme, looks_like_empty_esri_tile
 from landfinder.config import source_config
-from landfinder.filter_model import apply_terrain_filters, build_source_plan, visible_area_ids
+from landfinder.filter_model import apply_terrain_filters, build_source_plan, overlay_signature, renderable_area_geometries, visible_area_ids
+from landfinder.geocoder import address_components, candidate_score
 from landfinder.map_engine import _get
 from landfinder.metro_adapter import (
     METRO_FILES,
@@ -19,23 +20,30 @@ from landfinder.metro_adapter import (
     metro_current_for_area,
 )
 from landfinder.probes import health_state, probe_unconfigured, probe_web
-from landfinder.urban_value import _overpass
+from landfinder.progress import source_progress
+from landfinder.persistent_cache import cache_payload_is_valid
+from landfinder.summaries import land_use_summary_value
+from landfinder.urban_value import _overpass, built_asset_pipeline_from_payload
 
 
 class BasemapTests(unittest.TestCase):
-    def test_dark_basemap_uses_paired_carto_tiles(self):
+    def test_dark_basemap_uses_no_key_watermark_config(self):
         basemap = basemap_for_theme("Oscuro")
-        self.assertEqual(basemap.max_zoom, 20)
-        self.assertEqual(basemap.max_native_zoom, 20)
-        self.assertIn("basemaps.cartocdn.com/dark_all", basemap.tiles)
+        self.assertEqual(basemap.max_zoom, 19)
+        self.assertEqual(basemap.max_native_zoom, 19)
+        self.assertNotIn("cartocdn.com", basemap.tiles)
+        self.assertNotIn("API_KEY", basemap.tiles.upper())
+        self.assertNotIn("key=", basemap.tiles.lower())
+        self.assertIn("openstreetmap.org", basemap.tiles)
 
     def test_light_basemap_uses_same_provider_family(self):
         light = basemap_for_theme("Claro")
         dark = basemap_for_theme("Oscuro")
+        self.assertEqual(light.tiles, dark.tiles)
+        self.assertEqual(light.provider, dark.provider)
         self.assertEqual(light.max_native_zoom, dark.max_native_zoom)
-        self.assertIn("basemaps.cartocdn.com/light_all", light.tiles)
-        self.assertIn("CARTO", light.provider)
-        self.assertIn("CARTO", dark.provider)
+        self.assertIn("OpenStreetMap", light.provider)
+        self.assertTrue(dark.css_filter)
 
     def test_esri_empty_tile_detector_only_matches_high_zoom_small_tiles(self):
         self.assertTrue(looks_like_empty_esri_tile(200, 2521, 17))
@@ -54,7 +62,7 @@ class SourceConfigTests(unittest.TestCase):
         self.assertEqual(source_config(source)["timeout"], 0)
 
     def test_osm_sources_use_overpass_policy(self):
-        self.assertEqual(source_config("osm_overpass")["timeout"], 10)
+        self.assertEqual(source_config("osm_overpass")["timeout"], 16)
 
 
 class SourcePlanTests(unittest.TestCase):
@@ -80,6 +88,55 @@ class SourcePlanTests(unittest.TestCase):
     def test_multi_area_visibility_does_not_depend_on_active_area(self):
         areas = [{"id": "A", "visible": True}, {"id": "B", "visible": True}]
         self.assertEqual(visible_area_ids(areas), ["A", "B"])
+
+    def test_multi_area_render_model_keeps_two_geometries(self):
+        areas = [
+            {"id": "A", "name": "Área A", "sector": "La Florida", "lat": -33.56, "lon": -70.60, "radius_m": 2000, "visible": True},
+            {"id": "B", "name": "Área B", "sector": "Ñuñoa", "lat": -33.45, "lon": -70.59, "radius_m": 1000, "visible": True},
+        ]
+        geometries = renderable_area_geometries(areas)
+        self.assertEqual(len(geometries), 2)
+        self.assertEqual([item["id"] for item in geometries], ["A", "B"])
+
+    def test_theme_switch_keeps_same_overlay_signature(self):
+        snapshot = {"built": ["hospital"], "metro_current": True, "territory": ["minvu_prms_uso_suelo"], "risks": []}
+        self.assertEqual(overlay_signature(snapshot), overlay_signature(dict(snapshot)))
+
+
+class GeocoderTests(unittest.TestCase):
+    def test_geocoder_address_components_preserve_santa_raquel_number(self):
+        components = address_components("Sta Raquel 8204, La Florida, Santiago")
+        self.assertEqual(components["house_number"], "8204")
+        self.assertEqual(components["street"], "santa raquel")
+        self.assertEqual(components["commune"], "La Florida")
+        self.assertEqual(components["normalized_query"], "Santa Raquel 8204, La Florida, Región Metropolitana, Chile")
+
+    def test_geocoder_precision_requires_house_number_match(self):
+        components = address_components("Santa Raquel 8204, La Florida")
+        score = candidate_score(
+            components,
+            {
+                "display_name": "Avenida Santa Raquel, La Florida, Santiago, Chile",
+                "type": "road",
+                "address": {"road": "Avenida Santa Raquel", "city": "La Florida", "country": "Chile"},
+            },
+        )
+
+        self.assertNotEqual(score["precision"], "EXACT")
+        self.assertFalse(score["house_number_matched"])
+
+    def test_geocoder_precision_accepts_confirmed_house_number(self):
+        components = address_components("Santa Raquel 8204, La Florida")
+        score = candidate_score(
+            components,
+            {
+                "display_name": "Santa Raquel 8204, La Florida, Chile",
+                "type": "house",
+                "address": {"house_number": "8204", "road": "Santa Raquel", "city": "La Florida", "country": "Chile"},
+            },
+        )
+
+        self.assertEqual(score["precision"], "EXACT")
 
 
 class HealthStateTests(unittest.TestCase):
@@ -173,15 +230,15 @@ class MapEngineTimeoutTests(unittest.TestCase):
 
     @patch("landfinder.urban_value.time.sleep")
     @patch("landfinder.urban_value.requests.post")
-    def test_overpass_splits_total_timeout_across_mirrors(self, post, sleep):
+    def test_overpass_retries_mirrors_with_per_endpoint_timeout(self, post, sleep):
         post.side_effect = requests.exceptions.Timeout("slow")
 
         with self.assertRaises(RuntimeError):
             _overpass("[out:json];node(0,0,0,0);out;", timeout=3)
 
-        self.assertGreaterEqual(post.call_count, 2)
+        self.assertEqual(post.call_count, 3)
         for call in post.call_args_list:
-            self.assertLessEqual(call.kwargs["timeout"], 3)
+            self.assertEqual(call.kwargs["timeout"], 3)
 
     @patch("landfinder.urban_value.requests.post")
     def test_overpass_can_reject_suspicious_empty_mirror(self, post):
@@ -197,6 +254,68 @@ class MapEngineTimeoutTests(unittest.TestCase):
 
         self.assertEqual(payload["elements"], [{"id": 1}])
         self.assertEqual(post.call_count, 2)
+
+    @patch("landfinder.urban_value.time.sleep")
+    @patch("landfinder.urban_value.requests.post")
+    def test_overpass_does_not_accept_empty_when_other_mirrors_fail(self, post, sleep):
+        empty = Mock()
+        empty.raise_for_status.return_value = None
+        empty.json.return_value = {"elements": []}
+        post.side_effect = [requests.exceptions.Timeout("slow"), empty, requests.exceptions.Timeout("slow")]
+
+        with self.assertRaises(RuntimeError):
+            _overpass("[out:json];node(0,0,0,0);out;", timeout=3, require_nonempty=True)
+
+
+class CacheTests(unittest.TestCase):
+    def test_cache_error_not_empty(self):
+        self.assertFalse(cache_payload_is_valid({"value": [], "count": 0, "error": "timeout"}))
+
+    def test_poi_cache_invalidation_rejects_legacy_empty(self):
+        self.assertFalse(cache_payload_is_valid({"value": [], "stored_at": 1, "count": 0}))
+        self.assertTrue(cache_payload_is_valid({"value": [{"id": 1}], "stored_at": 1, "count": 1}))
+
+
+class PoiPipelineTests(unittest.TestCase):
+    def test_poi_pipeline_counts_and_icon_types(self):
+        payload = {
+            "elements": [
+                {"type": "node", "id": 1, "lat": -33.1, "lon": -70.1, "tags": {"amenity": "hospital", "name": "Hospital"}},
+                {"type": "node", "id": 2, "lat": -33.2, "lon": -70.2, "tags": {"amenity": "pharmacy", "name": "Farmacia"}},
+                {"type": "node", "id": 3, "lat": -33.3, "lon": -70.3, "tags": {"leisure": "park", "name": "Parque"}},
+                {"type": "node", "id": 4, "lat": -33.4, "lon": -70.4, "tags": {"shop": "supermarket", "name": "Supermercado"}},
+            ]
+        }
+        result = built_asset_pipeline_from_payload(payload, ["hospital", "pharmacy", "park", "supermarket"])
+
+        self.assertEqual(result["pipeline"]["raw"], 4)
+        self.assertEqual(result["pipeline"]["matching"], 4)
+        self.assertEqual(len(result["items"]), 4)
+        self.assertEqual({item["type"] for item in result["items"]}, {"hospital", "pharmacy", "park", "supermarket"})
+
+
+class SummaryTests(unittest.TestCase):
+    def test_prms_summary_not_pending_when_source_has_intersection(self):
+        bundle = {
+            "technical": {"minvu_prms_uso_suelo": {"records": [{"Elemento": "Zona Habitacional Mixta"}]}},
+            "layer_states": {"minvu_prms_uso_suelo": {"status": "SUCCESS_DATA", "count": 1}},
+        }
+
+        self.assertNotIn("Pendiente", land_use_summary_value(bundle))
+        self.assertIn("Zona Habitacional Mixta", land_use_summary_value(bundle))
+
+
+class ProgressTests(unittest.TestCase):
+    def test_progress_counts_terminal_sources(self):
+        half_states = {f"s{i}": {"status": "SUCCESS_DATA", "count": 1} for i in range(11)}
+        half_states.update({f"l{i}": {"status": "LOADING", "count": None} for i in range(11)})
+        done, total, ratio = source_progress({"layer_states": half_states})
+        self.assertEqual((done, total), (11, 22))
+        self.assertEqual(ratio, 0.5)
+
+        terminal_states = {f"s{i}": {"status": "SUCCESS_EMPTY", "count": 0} for i in range(22)}
+        done, total, ratio = source_progress({"layer_states": terminal_states})
+        self.assertEqual((done, total, ratio), (22, 22, 1.0))
 
 
 class MetroAdapterTests(unittest.TestCase):
