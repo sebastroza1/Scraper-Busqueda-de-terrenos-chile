@@ -27,7 +27,7 @@ def result_pipeline_counts(result: dict[str, Any] | None) -> dict[str, int]:
 
 def land_use_summary_value(bundle: dict[str, Any]) -> str:
     if not bundle:
-        return "N/D"
+        return "No consultado"
     result = (bundle.get("technical") or {}).get("minvu_prms_uso_suelo")
     state = (bundle.get("layer_states") or {}).get("minvu_prms_uso_suelo")
     if not state:

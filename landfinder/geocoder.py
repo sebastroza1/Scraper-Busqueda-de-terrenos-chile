@@ -34,13 +34,20 @@ COMMUNE_CENTERS = {
     "puente alto": (-33.6117, -70.5758, 12),
 }
 
-STREET_ALIASES = {
+STREET_WORD_ALIASES = {
     "sta": "santa",
     "sta.": "santa",
-    "av": "",
-    "av.": "",
-    "avenida": "",
-    "calle": "",
+}
+
+STREET_TYPE_ALIASES = {
+    "av": "avenida",
+    "av.": "avenida",
+    "avenida": "avenida",
+    "calle": "calle",
+    "pasaje": "pasaje",
+    "psje": "pasaje",
+    "psje.": "pasaje",
+    "camino": "camino",
 }
 
 
@@ -58,10 +65,19 @@ def requested_house_number(text: str) -> str | None:
 def normalize_street(text: str) -> str:
     tokens = []
     for raw in re.split(r"[\s,]+", normalize_text(text)):
-        token = STREET_ALIASES.get(raw, raw)
+        if raw in STREET_TYPE_ALIASES:
+            continue
+        token = STREET_WORD_ALIASES.get(raw, raw)
         if token and not token.isdigit() and token not in {"region", "metropolitana", "chile"}:
             tokens.append(token)
     return " ".join(tokens)
+
+
+def street_type(text: str) -> str | None:
+    for raw in re.split(r"[\s,]+", normalize_text(text)):
+        if raw in STREET_TYPE_ALIASES:
+            return STREET_TYPE_ALIASES[raw]
+    return None
 
 
 def address_components(query: str) -> dict[str, Any]:
@@ -78,6 +94,8 @@ def address_components(query: str) -> dict[str, Any]:
     return {
         "house_number": house_number,
         "street": normalize_street(street_part),
+        "street_name": normalize_street(street_part),
+        "street_type": street_type(street_part),
         "commune": commune,
         "region": "Región Metropolitana" if "metropolitana" in normalized or "santiago" in normalized else None,
         "country": "Chile",
@@ -112,6 +130,8 @@ def address_components_without_canonical(query: str) -> dict[str, Any]:
     return {
         "house_number": house_number,
         "street": normalize_street(street_part),
+        "street_name": normalize_street(street_part),
+        "street_type": street_type(street_part),
         "commune": commune,
         "region": "Región Metropolitana" if "metropolitana" in normalized or "santiago" in normalized else None,
         "country": "Chile",
@@ -150,23 +170,30 @@ def candidate_score(query_components: dict[str, Any], result: dict[str, Any]) ->
     display = normalize_text(result.get("display_name") or "")
     house_requested = query_components.get("house_number")
     house_found = str(address.get("house_number") or "")
-    street_found = normalize_street(" ".join(str(address.get(key) or "") for key in ("road", "pedestrian", "footway")))
+    raw_street_found = " ".join(str(address.get(key) or "") for key in ("road", "pedestrian", "footway"))
+    street_found = normalize_street(raw_street_found)
+    street_type_found = street_type(raw_street_found)
     commune_found = normalize_text(str(address.get("city") or address.get("town") or address.get("municipality") or address.get("county") or ""))
     street_query = query_components.get("street") or ""
+    street_type_query = query_components.get("street_type")
     commune_query = normalize_text(query_components.get("commune") or "")
 
     house_number_matched = bool(house_requested and house_found == house_requested)
-    street_matched = bool(street_query and (street_query in street_found or street_query in display))
+    street_matched = bool(street_query and (street_query == street_found or street_query in street_found or street_query in display))
+    street_type_matched = bool(street_type_query and street_type_found == street_type_query)
+    street_type_mismatch = bool(street_type_query and street_type_found and street_type_found != street_type_query)
     commune_matched = bool(commune_query and (commune_query in commune_found or commune_query in display))
     country_matched = "chile" in display or normalize_text(str(address.get("country") or "")) == "chile"
 
     score = 0
-    score += 80 if house_number_matched else 0
+    score += 110 if house_number_matched else 0
     score += 35 if street_matched else 0
+    score += 8 if street_type_matched else 0
+    score -= 8 if street_type_mismatch else 0
     score += 20 if commune_matched else 0
     score += 10 if country_matched else 0
 
-    if house_requested and house_number_matched and street_matched and commune_matched:
+    if house_requested and house_number_matched and street_matched and commune_matched and not street_type_mismatch:
         precision = "EXACT"
     elif house_requested and street_matched and commune_matched:
         precision = "INTERPOLATED" if result.get("type") in {"house", "building"} else "STREET"
@@ -182,10 +209,13 @@ def candidate_score(query_components: dict[str, Any], result: dict[str, Any]) ->
         "precision": precision,
         "house_number_matched": house_number_matched,
         "street_matched": street_matched,
+        "street_type_matched": street_type_matched,
+        "street_type_mismatch": street_type_mismatch,
         "commune_matched": commune_matched,
         "country_matched": country_matched,
         "house_number_found": house_found or None,
         "street_found": street_found or None,
+        "street_type_found": street_type_found,
         "commune_found": commune_found or None,
     }
 

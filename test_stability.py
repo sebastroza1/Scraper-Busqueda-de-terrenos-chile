@@ -8,6 +8,7 @@ from unittest.mock import Mock, patch
 
 import requests
 
+from landfinder.area_results import layer_snapshot_changed, layer_snapshot_has_active_layers, make_area_bundle, source_cache_key, store_area_bundle
 from landfinder.basemaps import basemap_for_theme, looks_like_empty_esri_tile
 from landfinder.config import source_config
 from landfinder.filter_model import apply_terrain_filters, build_source_plan, overlay_signature, renderable_area_geometries, visible_area_ids
@@ -20,7 +21,7 @@ from landfinder.metro_adapter import (
     metro_current_for_area,
 )
 from landfinder.probes import health_state, probe_unconfigured, probe_web
-from landfinder.progress import source_progress
+from landfinder.progress import progress_summary, source_progress
 from landfinder.persistent_cache import cache_payload_is_valid
 from landfinder.summaries import land_use_summary_value
 from landfinder.urban_value import _overpass, built_asset_pipeline_from_payload
@@ -102,14 +103,103 @@ class SourcePlanTests(unittest.TestCase):
         snapshot = {"built": ["hospital"], "metro_current": True, "territory": ["minvu_prms_uso_suelo"], "risks": []}
         self.assertEqual(overlay_signature(snapshot), overlay_signature(dict(snapshot)))
 
+    def test_layer_toggle_triggers_auto_load_without_filters_button(self):
+        before = {"built": [], "metro_current": False, "territory": [], "risks": []}
+        after = {"built": ["park"], "metro_current": False, "territory": [], "risks": []}
+
+        self.assertTrue(layer_snapshot_changed(before, after))
+        self.assertTrue(layer_snapshot_has_active_layers(after))
+
+    def test_terrain_filter_change_does_not_change_layer_snapshot(self):
+        before = {"built": ["park"], "metro_current": True, "territory": [], "risks": []}
+        after = dict(before)
+
+        self.assertFalse(layer_snapshot_changed(before, after))
+
+    def test_full_layer_selection_plans_22_sources(self):
+        plan = build_source_plan(
+            {
+                "built": ["supermarket", "mall", "hospital", "pharmacy", "education", "park"],
+                "metro_current": True,
+                "metro_future": True,
+                "road_network": True,
+                "osm_construction": True,
+                "seia": True,
+                "mop": True,
+                "territory": ["minvu_limites_urbanos", "minvu_prms_uso_suelo", "ide_hidrografia", "dga_derechos"],
+                "risks": [
+                    "minvu_area_riesgo",
+                    "dga_prohibiciones",
+                    "mma_humedales",
+                    "mma_areas_protegidas",
+                    "senapred_tsunami",
+                    "sernageomin_relaves",
+                ],
+            },
+            {},
+        )
+        source_ids = [
+            *[f"built_{asset_type}" for asset_type in plan["built_query_types"]],
+            *("metro_current" for _ in [None] if plan["metro_current"]),
+            *("metro_future" for _ in [None] if plan["metro_future"]),
+            *("osm_construction" for _ in [None] if plan["osm_construction"]),
+            *plan["future_gis"],
+            *plan["territory_sources"],
+            *plan["risk_sources"],
+        ]
+
+        self.assertEqual(len(dict.fromkeys(source_ids)), 22)
+
+
+class AreaResultRoutingTests(unittest.TestCase):
+    def test_cache_key_distinguishes_area_geometry_and_id(self):
+        area_a = {"id": "A", "lat": -33.524887, "lon": -70.603064, "radius_m": 2000}
+        area_b = {"id": "B", "lat": -33.4430, "lon": -70.6539, "radius_m": 2000}
+
+        key_a = source_cache_key(area_a, "metro_current", {"dataset": "local_geojson"})
+        key_b = source_cache_key(area_b, "metro_current", {"dataset": "local_geojson"})
+
+        self.assertNotEqual(key_a, key_b)
+        self.assertIn('"schema_version"', key_a)
+        self.assertIn('"spatial"', key_a)
+
+    def test_store_area_bundle_rejects_cross_area_result(self):
+        area_results = {}
+        bundle_b = {**make_area_bundle({"id": "B"}), "metro_summary": {"nearest_station": {"name": "La Moneda"}}}
+
+        with self.assertRaises(ValueError):
+            store_area_bundle(area_results, "A", bundle_b)
+
+        self.assertEqual(area_results, {})
+
+    def test_out_of_order_result_stays_with_request_area(self):
+        area_results = {}
+        active_area_id = "B"
+        bundle_b = {**make_area_bundle({"id": "B"}, "req-b"), "metro_summary": {"nearest_station": {"name": "La Moneda"}}}
+        bundle_a = {**make_area_bundle({"id": "A"}, "req-a"), "metro_summary": {"nearest_station": {"name": "Los Quillayes"}}}
+
+        store_area_bundle(area_results, "B", bundle_b)
+        store_area_bundle(area_results, "A", bundle_a)
+
+        self.assertEqual(active_area_id, "B")
+        self.assertEqual(area_results["B"]["metro_summary"]["nearest_station"]["name"], "La Moneda")
+        self.assertEqual(area_results["A"]["metro_summary"]["nearest_station"]["name"], "Los Quillayes")
+
 
 class GeocoderTests(unittest.TestCase):
     def test_geocoder_address_components_preserve_santa_raquel_number(self):
         components = address_components("Sta Raquel 8204, La Florida, Santiago")
         self.assertEqual(components["house_number"], "8204")
         self.assertEqual(components["street"], "santa raquel")
+        self.assertIsNone(components["street_type"])
         self.assertEqual(components["commune"], "La Florida")
         self.assertEqual(components["normalized_query"], "Santa Raquel 8204, La Florida, Región Metropolitana, Chile")
+
+    def test_geocoder_address_components_preserve_street_type(self):
+        components = address_components("Av. Santa Raquel 8204, La Florida")
+        self.assertEqual(components["house_number"], "8204")
+        self.assertEqual(components["street"], "santa raquel")
+        self.assertEqual(components["street_type"], "avenida")
 
     def test_geocoder_precision_requires_house_number_match(self):
         components = address_components("Santa Raquel 8204, La Florida")
@@ -137,6 +227,29 @@ class GeocoderTests(unittest.TestCase):
         )
 
         self.assertEqual(score["precision"], "EXACT")
+
+    def test_geocoder_house_number_score_beats_similar_street_without_number(self):
+        components = address_components("Av. Santa Raquel 8204, La Florida")
+        exact_number = candidate_score(
+            components,
+            {
+                "display_name": "Avenida Santa Raquel 8204, La Florida, Chile",
+                "type": "house",
+                "address": {"house_number": "8204", "road": "Avenida Santa Raquel", "city": "La Florida", "country": "Chile"},
+            },
+        )
+        similar_street = candidate_score(
+            components,
+            {
+                "display_name": "Avenida Santa Raquel, La Florida, Santiago, Chile",
+                "type": "road",
+                "address": {"road": "Avenida Santa Raquel", "city": "La Florida", "country": "Chile"},
+            },
+        )
+
+        self.assertGreater(exact_number["score"], similar_street["score"])
+        self.assertEqual(exact_number["precision"], "EXACT")
+        self.assertNotEqual(similar_street["precision"], "EXACT")
 
 
 class HealthStateTests(unittest.TestCase):
@@ -316,6 +429,18 @@ class ProgressTests(unittest.TestCase):
         terminal_states = {f"s{i}": {"status": "SUCCESS_EMPTY", "count": 0} for i in range(22)}
         done, total, ratio = source_progress({"layer_states": terminal_states})
         self.assertEqual((done, total, ratio), (22, 22, 1.0))
+
+    def test_progress_keeps_loading_and_queued_sources_open(self):
+        states = {f"done_{i}": {"status": "SUCCESS_DATA", "count": 2, "duration_ms": 1000} for i in range(8)}
+        states["current"] = {"status": "LOADING", "count": None, "duration_ms": 0}
+        states.update({f"queued_{i}": {"status": "NOT_REQUESTED", "count": None, "duration_ms": 0} for i in range(13)})
+
+        summary = progress_summary({"layer_states": states})
+
+        self.assertEqual(summary["done"], 8)
+        self.assertEqual(summary["total"], 22)
+        self.assertAlmostEqual(summary["ratio"], 8 / 22)
+        self.assertFalse(summary["complete"])
 
 
 class MetroAdapterTests(unittest.TestCase):
