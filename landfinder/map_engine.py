@@ -11,6 +11,7 @@ from shapely.geometry import shape, mapping, Point
 from shapely.ops import transform as shp_transform
 
 from .config import DEFAULT_TIMEOUT, USER_AGENT, source_config
+from .request_metrics import record_network
 from .source_states import ERROR, NOT_CONFIGURED, SUCCESS_DATA, SUCCESS_EMPTY, VISUAL_ONLY
 
 
@@ -26,14 +27,18 @@ def _get(url, params=None, timeout=DEFAULT_TIMEOUT):
     last_error = None
     attempts = 1
     for attempt in range(attempts):
+        started = time.perf_counter()
         try:
-            return requests.get(
+            response = requests.get(
                 url,
                 params=params,
                 timeout=effective_timeout,
                 headers={"User-Agent": USER_AGENT, "Accept": "*/*"},
             )
+            record_network(url, int((time.perf_counter() - started) * 1000))
+            return response
         except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as exc:
+            record_network(url, int((time.perf_counter() - started) * 1000))
             last_error = exc
             if attempt < attempts - 1:
                 time.sleep(0.8)

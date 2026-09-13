@@ -107,6 +107,21 @@ def build_source_plan(map_layers: dict[str, Any], terrain_filters: dict[str, Any
     }
 
 
+def planned_source_ids(source_plan: dict[str, Any]) -> list[str]:
+    ids = []
+    if source_plan["metro_current"]:
+        ids.append("metro_current")
+    if source_plan["metro_future"]:
+        ids.append("metro_future")
+    ids.extend(source_plan["future_gis"])
+    ids.extend(source_plan["territory_sources"])
+    ids.extend(source_plan["risk_sources"])
+    ids.extend(f"built_{asset_type}" for asset_type in source_plan["built_query_types"])
+    if source_plan["osm_construction"]:
+        ids.append("osm_construction")
+    return list(dict.fromkeys(ids))
+
+
 def _feature_shapes(dataset: dict[str, Any] | None):
     if not dataset:
         return []

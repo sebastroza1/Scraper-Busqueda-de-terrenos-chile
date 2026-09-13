@@ -12,6 +12,14 @@ INTERNAL_SOURCE_REGISTRY: dict[str, dict[str, Any]] = {
         "kind": "overpass_query",
         "depends_on_overpass": True,
     },
+    "osm_poi_batch": {
+        "id": "osm_poi_batch",
+        "provider": "overpass",
+        "name": "OpenStreetMap POI agrupado",
+        "category": "Equipamiento",
+        "kind": "overpass_query",
+        "depends_on_overpass": True,
+    },
     "osm_construction": {
         "id": "osm_construction",
         "provider": "overpass",

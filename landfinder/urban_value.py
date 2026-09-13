@@ -11,6 +11,7 @@ from shapely.geometry import Point, LineString, MultiLineString
 from shapely.ops import transform as shp_transform
 
 from .config import USER_AGENT, source_config
+from .request_metrics import record_network
 
 
 OVERPASS_ENDPOINTS = [
@@ -128,16 +129,27 @@ def _overpass(query: str, timeout: int = 50, require_nonempty: bool = False) -> 
     errors = []
     empty_hosts = []
     empty_payload = None
-    request_timeout = max(float(timeout), 1.0)
+    budget_seconds = max(float(timeout), 1.0)
+    deadline = time.monotonic() + budget_seconds
     for endpoint in OVERPASS_ENDPOINTS:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            errors.append("budget: exhausted")
+            break
+        started = None
+        recorded = False
         try:
             host = endpoint.split("/")[2]
+            request_timeout = max(min(remaining, budget_seconds), 0.001)
+            started = time.perf_counter()
             r = requests.post(
                 endpoint,
                 data={"data": query},
                 timeout=request_timeout,
                 headers={"User-Agent": USER_AGENT, "Accept": "application/json"},
             )
+            record_network(endpoint, int((time.perf_counter() - started) * 1000))
+            recorded = True
             r.raise_for_status()
             payload = r.json()
             if require_nonempty and not payload.get("elements"):
@@ -146,13 +158,17 @@ def _overpass(query: str, timeout: int = 50, require_nonempty: bool = False) -> 
                 continue
             return payload
         except Exception as exc:
+            if started is not None and not recorded:
+                record_network(endpoint, int((time.perf_counter() - started) * 1000))
             errors.append(f"{host}: {type(exc).__name__}")
-            time.sleep(0.2)
+            if deadline - time.monotonic() > 0.2:
+                time.sleep(0.2)
     if empty_payload is not None and not errors:
         return empty_payload
     raise RuntimeError(
         "OpenStreetMap/Overpass no respondió a tiempo. "
         "Las demás fuentes pueden seguir funcionando. "
+        f"Budget total: {budget_seconds:.1f}s. "
         f"Intentos: {', '.join([*errors, *empty_hosts]) if errors or empty_hosts else 'sin respuesta'}"
     )
 

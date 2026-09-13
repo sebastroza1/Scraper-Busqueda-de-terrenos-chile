@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .source_states import FAILURE_STATES, MISSING_DATA, NOT_CONFIGURED, SUCCESS_DATA, SUCCESS_EMPTY, normalize_status
+from .source_states import FAILURE_STATES, LOADING, MISSING_DATA, NOT_CONFIGURED, NOT_REQUESTED, SUCCESS_DATA, SUCCESS_EMPTY, normalize_status
 
 
 def result_pipeline_counts(result: dict[str, Any] | None) -> dict[str, int]:
@@ -23,6 +23,29 @@ def result_pipeline_counts(result: dict[str, Any] | None) -> dict[str, int]:
     if not counts["stored"]:
         counts["stored"] = len(result.get("records") or [])
     return counts
+
+
+def aggregate_count_summary_value(count: int, states: list[dict[str, Any]], count_key: str) -> str:
+    if not states:
+        return "No consultado"
+    statuses = [normalize_status(state.get("status"), state.get("count")) for state in states]
+    has_success = any(status == SUCCESS_DATA for status in statuses)
+    has_pending = any(status in {LOADING, NOT_REQUESTED} for status in statuses)
+    has_failure = any(status in FAILURE_STATES for status in statuses)
+    if has_success and (has_failure or has_pending):
+        if count_key == "future_records":
+            noun = "detectado" if int(count) == 1 else "detectados"
+        else:
+            noun = "disponible" if int(count) == 1 else "disponibles"
+        suffix = "actualizando" if has_pending else "datos parciales"
+        return f"{int(count)} {noun} · {suffix}"
+    if any(status in FAILURE_STATES for status in statuses):
+        return "Temporalmente no disponible"
+    if any(status in {NOT_CONFIGURED, MISSING_DATA} for status in statuses):
+        return "Fuente no configurada"
+    if has_pending:
+        return "Consultando..."
+    return str(int(count))
 
 
 def land_use_summary_value(bundle: dict[str, Any]) -> str:

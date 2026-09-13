@@ -11,7 +11,14 @@ import requests
 from landfinder.area_results import layer_snapshot_changed, layer_snapshot_has_active_layers, make_area_bundle, source_cache_key, store_area_bundle
 from landfinder.basemaps import basemap_for_theme, looks_like_empty_esri_tile
 from landfinder.config import source_config
-from landfinder.filter_model import apply_terrain_filters, build_source_plan, overlay_signature, renderable_area_geometries, visible_area_ids
+from landfinder.filter_model import (
+    apply_terrain_filters,
+    build_source_plan,
+    overlay_signature,
+    planned_source_ids,
+    renderable_area_geometries,
+    visible_area_ids,
+)
 from landfinder.geocoder import address_components, candidate_score
 from landfinder.map_engine import _get
 from landfinder.metro_adapter import (
@@ -23,8 +30,20 @@ from landfinder.metro_adapter import (
 from landfinder.probes import health_state, probe_unconfigured, probe_web
 from landfinder.progress import progress_summary, source_progress
 from landfinder.persistent_cache import cache_payload_is_valid
-from landfinder.summaries import land_use_summary_value
+from landfinder.request_metrics import finish_run, record_source_reuse, start_run
+from landfinder.summaries import aggregate_count_summary_value, land_use_summary_value
 from landfinder.urban_value import _overpass, built_asset_pipeline_from_payload
+
+
+class RequestMetricsTests(unittest.TestCase):
+    def test_reused_terminal_sources_are_counted_as_deduplicated(self):
+        start_run("run-1", ["B"], ["sea_proyectos"])
+        record_source_reuse("sea_proyectos", {"status": "SUCCESS_DATA", "duration_ms": 12, "cache": "HIT"})
+        metrics = finish_run()
+
+        self.assertEqual(metrics["deduplicated_requests"], 1)
+        self.assertEqual(metrics["request_count"], 0)
+        self.assertEqual(metrics["source_operations"]["sea_proyectos"]["status"], "reuse:SUCCESS_DATA")
 
 
 class BasemapTests(unittest.TestCase):
@@ -63,7 +82,7 @@ class SourceConfigTests(unittest.TestCase):
         self.assertEqual(source_config(source)["timeout"], 0)
 
     def test_osm_sources_use_overpass_policy(self):
-        self.assertEqual(source_config("osm_overpass")["timeout"], 16)
+        self.assertEqual(source_config("osm_overpass")["timeout"], 8)
 
 
 class SourcePlanTests(unittest.TestCase):
@@ -138,17 +157,12 @@ class SourcePlanTests(unittest.TestCase):
             },
             {},
         )
-        source_ids = [
-            *[f"built_{asset_type}" for asset_type in plan["built_query_types"]],
-            *("metro_current" for _ in [None] if plan["metro_current"]),
-            *("metro_future" for _ in [None] if plan["metro_future"]),
-            *("osm_construction" for _ in [None] if plan["osm_construction"]),
-            *plan["future_gis"],
-            *plan["territory_sources"],
-            *plan["risk_sources"],
-        ]
+        source_ids = planned_source_ids(plan)
 
         self.assertEqual(len(dict.fromkeys(source_ids)), 22)
+        self.assertEqual(source_ids[:2], ["metro_current", "metro_future"])
+        self.assertGreater(source_ids.index("built_hospital"), source_ids.index("senapred_tsunami"))
+        self.assertEqual(source_ids[-1], "osm_construction")
 
 
 class AreaResultRoutingTests(unittest.TestCase):
@@ -343,15 +357,16 @@ class MapEngineTimeoutTests(unittest.TestCase):
 
     @patch("landfinder.urban_value.time.sleep")
     @patch("landfinder.urban_value.requests.post")
-    def test_overpass_retries_mirrors_with_per_endpoint_timeout(self, post, sleep):
+    def test_overpass_retries_mirrors_with_total_timeout_budget(self, post, sleep):
         post.side_effect = requests.exceptions.Timeout("slow")
 
         with self.assertRaises(RuntimeError):
             _overpass("[out:json];node(0,0,0,0);out;", timeout=3)
 
         self.assertEqual(post.call_count, 3)
-        for call in post.call_args_list:
-            self.assertEqual(call.kwargs["timeout"], 3)
+        timeouts = [call.kwargs["timeout"] for call in post.call_args_list]
+        self.assertTrue(all(timeout <= 3 for timeout in timeouts))
+        self.assertGreaterEqual(timeouts[0], timeouts[-1])
 
     @patch("landfinder.urban_value.requests.post")
     def test_overpass_can_reject_suspicious_empty_mirror(self, post):
@@ -417,6 +432,31 @@ class SummaryTests(unittest.TestCase):
         self.assertNotIn("Pendiente", land_use_summary_value(bundle))
         self.assertIn("Zona Habitacional Mixta", land_use_summary_value(bundle))
 
+    def test_partial_equipment_keeps_valid_counts(self):
+        value = aggregate_count_summary_value(
+            5,
+            [
+                {"status": "SUCCESS_DATA", "count": 5},
+                {"status": "TIMEOUT", "count": None},
+                {"status": "CIRCUIT_OPEN", "count": None},
+            ],
+            "assets",
+        )
+
+        self.assertEqual(value, "5 disponibles · datos parciales")
+
+    def test_partial_future_projects_keeps_mop_when_seia_fails(self):
+        value = aggregate_count_summary_value(
+            1,
+            [
+                {"status": "ERROR", "count": None},
+                {"status": "SUCCESS_DATA", "count": 1},
+            ],
+            "future_records",
+        )
+
+        self.assertEqual(value, "1 detectado · datos parciales")
+
 
 class ProgressTests(unittest.TestCase):
     def test_progress_counts_terminal_sources(self):
@@ -441,6 +481,23 @@ class ProgressTests(unittest.TestCase):
         self.assertEqual(summary["total"], 22)
         self.assertAlmostEqual(summary["ratio"], 8 / 22)
         self.assertFalse(summary["complete"])
+
+    def test_progress_counts_shared_batch_duration_once(self):
+        states = {
+            f"built_{asset_type}": {
+                "status": "TIMEOUT",
+                "count": None,
+                "duration_ms": 20_000,
+                "batch_source_id": "osm_poi_batch",
+                "source_id": f"built_{asset_type}",
+            }
+            for asset_type in ("hospital", "pharmacy", "park", "supermarket", "mall", "education")
+        }
+        states["osm_construction"] = {"status": "TIMEOUT", "count": None, "duration_ms": 8_000, "source_id": "osm_construction"}
+
+        summary = progress_summary({"layer_states": states})
+
+        self.assertEqual(summary["duration_ms"], 28_000)
 
 
 class MetroAdapterTests(unittest.TestCase):

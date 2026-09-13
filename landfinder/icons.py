@@ -30,7 +30,7 @@ ICON_REGISTRY: dict[str, dict[str, Any]] = {
     "water": {"label": "Agua / hidrografía", "color": "#06B6D4", "glyph": "~"},
     "industrial": {"label": "Zona industrial", "color": "#64748B", "glyph": "I"},
     "selected_location": {"label": "Ubicación seleccionada", "color": "#2563EB", "glyph": ""},
-    "construction": {"label": "Construcción OSM", "color": "#FF7A1A", "glyph": "!"},
+    "construction": {"label": "Construcción OSM", "color": "#FF7A1A", "glyph": "build"},
 }
 
 
@@ -49,6 +49,8 @@ def glyph_svg(glyph: str, color: str) -> str:
         return f"<path d='M16 18h16l-1.2 15H17.2L16 18Z' fill='{color}'/><path d='M20 18c0-4 8-4 8 0' fill='none' stroke='white' stroke-width='2.2' stroke-linecap='round'/>"
     if glyph == "fuel":
         return f"<path d='M18 13h10v20H18z' fill='{color}'/><path d='M20 16h6v5h-6z' fill='white'/><path d='M28 17l5 5v8c0 2-3 2-3 0v-5' fill='none' stroke='{color}' stroke-width='2.3' stroke-linecap='round' stroke-linejoin='round'/>"
+    if glyph == "build":
+        return f"<path d='M16 29h16v4H16z' fill='{color}'/><path d='M18 16h4v13h-4zM26 13h4v16h-4z' fill='{color}'/><path d='M15 20h18' stroke='{color}' stroke-width='2.2' stroke-linecap='round'/><path d='M21 16l5-5h8' fill='none' stroke='{color}' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'/>"
     if glyph == "lot":
         return f"<path d='M15 16l15-4 4 16-15 4-4-16Z' fill='none' stroke='{color}' stroke-width='2.7' stroke-linejoin='round'/><path d='M20 15l4 15M28 13l4 14' stroke='{color}' stroke-width='1.8'/>"
     if glyph == "school":

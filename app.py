@@ -24,7 +24,7 @@ from landfinder.area_results import (
 )
 from landfinder.basemaps import basemap_for_theme
 from landfinder.config import USER_AGENT, source_config
-from landfinder.filter_model import build_source_plan, renderable_area_geometries
+from landfinder.filter_model import build_source_plan, planned_source_ids, renderable_area_geometries
 from landfinder.geocoder import (
     geocode_address as geocode_address_structured,
     parse_coordinates as parse_coordinates_structured,
@@ -45,7 +45,18 @@ from landfinder.persistent_cache import (
 from landfinder.probes import health_state, probe_source
 from landfinder.progress import progress_summary, source_progress
 from landfinder.registry import load_sources
+from landfinder.request_metrics import (
+    finish_run as finish_request_metrics,
+    metrics_snapshot,
+    record_cache as record_request_cache,
+    record_source_operation,
+    record_source_reuse,
+    reset_current_source,
+    set_current_source,
+    start_run as start_request_metrics,
+)
 from landfinder.runtime_sources import provider_key_for
+from landfinder.source_capabilities import build_source_capabilities
 from landfinder.source_states import (
     CIRCUIT_OPEN,
     ERROR,
@@ -66,7 +77,7 @@ from landfinder.source_states import (
     source_result_count,
 )
 from landfinder.storage import load_history, save_result
-from landfinder.summaries import land_use_summary_value, result_pipeline_counts
+from landfinder.summaries import aggregate_count_summary_value, land_use_summary_value, result_pipeline_counts
 from landfinder.urban_value import (
     ASSET_TYPES,
     CURRENT_LINE_ORDER,
@@ -968,10 +979,12 @@ def init_state() -> None:
         "map_bundle": {},
         "api_results": {},
         "source_cache": {},
+        "source_capabilities": {},
         "source_status": {},
         "source_status_by_area": {},
         "source_circuits": {},
         "source_progress": {},
+        "last_source_metrics": None,
         "active_request_id": None,
         "active_source_job": None,
         "mode": "Explorar",
@@ -1219,6 +1232,14 @@ def source_duration_text(result: dict[str, Any] | None) -> str:
     return "-"
 
 
+def ordered_layer_state_items(bundle: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
+    states = bundle.get("layer_states") or {}
+    source_plan = bundle.get("source_plan") or {}
+    ordered_ids = planned_source_ids(source_plan) if source_plan else []
+    ordered_ids.extend(layer_id for layer_id in states if layer_id not in ordered_ids)
+    return [(layer_id, states[layer_id]) for layer_id in ordered_ids if layer_id in states]
+
+
 def bundle_counts(bundle: dict[str, Any]) -> dict[str, Any]:
     current_lines = [
         ref for ref, line in (bundle.get("metro_current") or {}).items()
@@ -1289,12 +1310,8 @@ def count_summary_value(bundle: dict[str, Any], count_key: str, source_ids: list
     states = [layer_state(bundle, source_id) for source_id in source_ids if layer_state(bundle, source_id)]
     if not states:
         return "No consultado"
-    statuses = [normalize_status(state.get("status"), state.get("count")) for state in states]
-    if any(status in FAILURE_STATES for status in statuses):
-        return "Temporalmente no disponible"
-    if any(status in {NOT_CONFIGURED, MISSING_DATA} for status in statuses):
-        return "Fuente no configurada"
-    return str(bundle_counts(bundle)[count_key])
+    count = int(bundle_counts(bundle)[count_key] or 0)
+    return aggregate_count_summary_value(count, states, count_key)
 
 
 def risk_summary_value(bundle: dict[str, Any]) -> str:
@@ -1569,6 +1586,8 @@ def run_source(
     if cached and ttl and now - float(cached.get("stored_at", 0)) <= ttl:
         result = cached["value"]
         count = cached.get("count")
+        record_request_cache(source_id, "HIT")
+        record_source_operation(source_id, "cache_hit", 0, "HIT")
         set_source_status(source_id, "cache_hit", 0, count, "HIT", area_id=area_id, request_id=request_id)
         state = with_area_context({
             "status": SUCCESS_DATA if (count or 0) > 0 else SUCCESS_EMPTY,
@@ -1583,12 +1602,14 @@ def run_source(
         }, area_id, source_id, request_id)
         return result, state
     if cached:
+        record_request_cache(source_id, "STALE")
         set_source_status(source_id, "refreshing", 0, cached.get("count"), "STALE", area_id=area_id, request_id=request_id)
 
     if not circuit_allows(circuit_key, cfg):
         count = cached.get("count") if cached else None
         if cached:
             set_source_status(source_id, "circuit_open_cache", 0, count, "STALE", area_id=area_id, request_id=request_id)
+            record_source_operation(source_id, "circuit_open_cache", 0, "STALE")
             state = with_area_context({
                 "status": STALE,
                 "count": count,
@@ -1601,11 +1622,15 @@ def run_source(
             }, area_id, source_id, request_id)
             return cached["value"], state
         error = "Fuente pausada temporalmente por fallos repetidos. Reintenta más tarde."
+        record_request_cache(source_id, "MISS")
+        record_source_operation(source_id, "circuit_open", 0, "MISS")
         set_source_status(source_id, "circuit_open", 0, None, "MISS", error, area_id=area_id, request_id=request_id)
         return None, with_area_context({"status": CIRCUIT_OPEN, "count": None, "error": error, "duration_ms": 0, "cache": "MISS"}, area_id, source_id, request_id)
 
     start = time.perf_counter()
+    token = set_current_source(source_id)
     try:
+        record_request_cache(source_id, "MISS")
         result = producer()
         duration_ms = int((time.perf_counter() - start) * 1000)
         count = source_result_count(result)
@@ -1624,6 +1649,7 @@ def run_source(
         if count is not None:
             write_persistent_cache(key, cached_payload)
         record_circuit_success(circuit_key)
+        record_source_operation(source_id, "success", duration_ms, "MISS")
         set_source_status(source_id, "success", duration_ms, count, "MISS", area_id=area_id, request_id=request_id)
         state = with_area_context({
             "status": SUCCESS_DATA if (count or 0) > 0 else SUCCESS_EMPTY,
@@ -1644,6 +1670,7 @@ def run_source(
         record_circuit_failure(circuit_key, cfg)
         if cached:
             count = cached.get("count")
+            record_source_operation(source_id, "stale_cache", duration_ms, "STALE")
             set_source_status(source_id, "stale_cache", duration_ms, count, "STALE", error, area_id=area_id, request_id=request_id)
             return cached["value"], with_area_context({
                 "status": STALE,
@@ -1655,8 +1682,12 @@ def run_source(
                 "cache_digest": cache_digest(key),
                 "cache_age_seconds": cache_age_seconds(cached, now),
             }, area_id, source_id, request_id)
-        set_source_status(source_id, "timeout" if status == TIMEOUT else "error", duration_ms, None, "MISS", error, area_id=area_id, request_id=request_id)
+        runtime_status = "timeout" if status == TIMEOUT else "error"
+        record_source_operation(source_id, runtime_status, duration_ms, "MISS")
+        set_source_status(source_id, runtime_status, duration_ms, None, "MISS", error, area_id=area_id, request_id=request_id)
         return None, with_area_context({"status": status, "count": None, "error": error, "duration_ms": duration_ms, "cache": "MISS"}, area_id, source_id, request_id)
+    finally:
+        reset_current_source(token)
 
 
 def add_area_circle(map_obj: folium.Map, area: dict[str, Any], active: bool = False) -> None:
@@ -1710,11 +1741,18 @@ def add_location_marker(map_obj: folium.Map, location: dict[str, Any], area_name
         [float(location["lat"]), float(location["lon"])],
         icon=marker_icon("selected_location"),
         tooltip=f"{label}: {compact_place_label(location.get('display_name') or location.get('query') or '', 72)}",
-        popup=(
-            f"<b>{label}</b><br>"
-            f"{compact_place_label(location.get('display_name') or '', 120)}<br>"
-            f"Precisión: {precision}<br>"
-            f"Número coincidente: {'sí' if location.get('house_number_matched') else 'no'}"
+        popup=folium.Popup(
+            map_popup_html(
+                label,
+                "Ubicación",
+                [
+                    ("Dirección", compact_place_label(location.get("display_name") or "", 120)),
+                    ("Precisión", precision),
+                    ("Número", "sí" if location.get("house_number_matched") else "no"),
+                ],
+                "#2563EB",
+            ),
+            max_width=320,
         ),
     ).add_to(map_obj)
 
@@ -1777,6 +1815,21 @@ def add_metro_line(map_obj: folium.Map, line: dict[str, Any], future: bool = Fal
     group.add_to(map_obj)
 
 
+def map_popup_html(title: str, subtitle: str, rows: list[tuple[str, Any]], color: str) -> str:
+    safe_rows = "".join(
+        f"<div class='lf-map-popup-row'><span>{html.escape(str(label))}</span><b>{html.escape(str(value))}</b></div>"
+        for label, value in rows
+        if value not in (None, "")
+    )
+    return f"""
+    <div class="lf-map-popup" style="--lf-accent:{html.escape(color)}">
+      <div class="lf-map-popup-kicker">{html.escape(subtitle)}</div>
+      <div class="lf-map-popup-title">{html.escape(title or 'Elemento')}</div>
+      {safe_rows}
+    </div>
+    """
+
+
 def add_geojson_result(map_obj: folium.Map, label: str, result: dict[str, Any], color: str) -> None:
     rendered = 0
     if result.get("type") == "geojson_layers":
@@ -1798,6 +1851,13 @@ def add_geojson_result(map_obj: folium.Map, label: str, result: dict[str, Any], 
                 tooltip=folium.GeoJsonTooltip(
                     fields=["__label", "__distance_m"],
                     aliases=["Elemento", "Distancia m"],
+                    class_name="lf-geo-tooltip",
+                    style=(
+                        f"background:{'#0D1726' if st.session_state.get('page_theme') == 'Oscuro' else '#FFFFFF'};"
+                        f"color:{'#EAF2FF' if st.session_state.get('page_theme') == 'Oscuro' else '#071426'};"
+                        f"border:1px solid {color};border-radius:8px;box-shadow:0 10px 24px rgba(0,0,0,.22);"
+                        "font-family:Inter,Segoe UI,Arial,sans-serif;font-size:12px;padding:8px 10px;"
+                    ),
                     sticky=False,
                 ),
             ).add_to(group)
@@ -1944,20 +2004,6 @@ def state_from_map_result(result: dict[str, Any], runtime_state: dict[str, Any])
     return state
 
 
-def planned_source_ids(source_plan: dict[str, Any]) -> list[str]:
-    ids = [f"built_{asset_type}" for asset_type in source_plan["built_query_types"]]
-    if source_plan["metro_current"]:
-        ids.append("metro_current")
-    if source_plan["metro_future"]:
-        ids.append("metro_future")
-    if source_plan["osm_construction"]:
-        ids.append("osm_construction")
-    ids.extend(source_plan["future_gis"])
-    ids.extend(source_plan["territory_sources"])
-    ids.extend(source_plan["risk_sources"])
-    return list(dict.fromkeys(ids))
-
-
 def area_source_plan(
     snapshot: dict[str, Any],
     terrain_filters: dict[str, Any],
@@ -2040,6 +2086,75 @@ def refresh_derived_bundle(area: dict[str, Any], bundle: dict[str, Any]) -> None
     bundle["updated_at"] = datetime.now().isoformat(timespec="seconds")
 
 
+def run_built_source_batch(
+    area: dict[str, Any],
+    bundle: dict[str, Any],
+    request_id: str | None = None,
+) -> None:
+    source_plan = bundle["source_plan"]
+    built_types = list(source_plan["built_query_types"] or [])
+    if not built_types:
+        return
+
+    overpass_cfg = source_config("osm_overpass")
+    overpass_timeout = int(overpass_cfg["timeout"])
+    result, state = run_source(
+        "osm_poi_batch",
+        {"types": built_types},
+        area,
+        lambda: query_built_assets_with_audit(
+            area["lat"],
+            area["lon"],
+            area["radius_m"],
+            built_types,
+            timeout=overpass_timeout,
+        ),
+        overpass_cfg,
+        request_id=request_id,
+    )
+    all_items = (result or {}).get("items") if isinstance(result, dict) else []
+    bundle["assets"] = [
+        item
+        for item in (bundle.get("assets") or [])
+        if item.get("type") not in set(built_types)
+    ]
+    bundle["assets"].extend(all_items or [])
+
+    shared_pipeline = dict((state.get("pipeline") or {}))
+    shared_status = normalize_status(state.get("status"), state.get("count"))
+    for asset_type in built_types:
+        source_id = f"built_{asset_type}"
+        typed_items = [item for item in all_items or [] if item.get("type") == asset_type]
+        typed_pipeline = dict(shared_pipeline)
+        typed_pipeline["matching"] = len(typed_items)
+        typed_pipeline["stored"] = len(typed_items)
+        typed_pipeline["rendered"] = len(typed_items) if asset_type in source_plan["built_visual_types"] else 0
+        typed_state = {
+            **state,
+            "source_id": source_id,
+            "status": shared_status if shared_status in FAILURE_STATES else (SUCCESS_DATA if typed_items else SUCCESS_EMPTY),
+            "count": len(typed_items) if shared_status not in FAILURE_STATES else state.get("count"),
+            "pipeline": typed_pipeline,
+            "batch_source_id": "osm_poi_batch",
+        }
+        bundle["layer_states"][source_id] = typed_state
+        set_source_status(
+            source_id,
+            "success" if typed_state["status"] in {SUCCESS_DATA, SUCCESS_EMPTY} else str(typed_state["status"]).lower(),
+            int(typed_state.get("duration_ms") or 0),
+            typed_state.get("count"),
+            str(typed_state.get("cache") or "MISS"),
+            typed_state.get("error"),
+            area_id=str(area.get("id")),
+            request_id=request_id,
+        )
+    refresh_derived_bundle(area, bundle)
+    print(
+        f"[SOURCE: OSM_POI_BATCH] raw={shared_pipeline.get('raw', 0)} "
+        f"stored={len(all_items or [])} requested_types={','.join(built_types)}"
+    )
+
+
 def run_planned_source(
     area: dict[str, Any],
     bundle: dict[str, Any],
@@ -2055,38 +2170,7 @@ def run_planned_source(
         asset_type = source_id.removeprefix("built_")
         if asset_type not in source_plan["built_query_types"]:
             return
-        result, state = run_source(
-            source_id,
-            {"type": asset_type},
-            area,
-            lambda asset_type=asset_type: query_built_assets_with_audit(
-                area["lat"],
-                area["lon"],
-                area["radius_m"],
-                [asset_type],
-                timeout=overpass_timeout,
-            ),
-            overpass_cfg,
-            request_id=request_id,
-        )
-        items = (result or {}).get("items") if isinstance(result, dict) else (result or [])
-        existing_ids = {
-            (item.get("osm_type"), item.get("osm_id"), item.get("type"))
-            for item in bundle.get("assets") or []
-        }
-        for item in items or []:
-            item_key = (item.get("osm_type"), item.get("osm_id"), item.get("type"))
-            if item_key not in existing_ids:
-                bundle["assets"].append(item)
-                existing_ids.add(item_key)
-        pipeline = dict((state.get("pipeline") or {}))
-        pipeline["rendered"] = len(items or []) if asset_type in source_plan["built_visual_types"] else 0
-        bundle["layer_states"][source_id] = {**state, "pipeline": pipeline}
-        refresh_derived_bundle(area, bundle)
-        print(
-            f"[SOURCE: OSM_POI] stored={len(bundle['assets'])} "
-            f"rendered={len(bundle['visual_assets'])} visual_types={','.join(sorted(source_plan['built_visual_types'])) or 'none'}"
-        )
+        run_built_source_batch(area, bundle, request_id)
         return
 
     if source_id == "metro_current" and source_plan["metro_current"]:
@@ -2289,15 +2373,35 @@ def start_area_source_job(area: dict[str, Any], summary: bool = False) -> None:
     }
     refresh_derived_bundle(area, bundle)
     source_ids = planned_source_ids(source_plan)
+    capability_ids = [*source_ids]
+    if any(source_id.startswith("built_") for source_id in source_ids):
+        capability_ids.append("osm_poi_batch")
+    st.session_state.source_capabilities.update(build_source_capabilities(capability_ids, SOURCE_BY_ID))
+    start_request_metrics(request_id, [str(area["id"])], capability_ids)
+    st.session_state.last_source_metrics = None
+    pending_source_ids = []
     for source_id in source_ids:
         state = (bundle.get("layer_states") or {}).get(source_id) or {}
-        if normalize_status(state.get("status"), state.get("count")) not in TERMINAL_STATES:
+        if normalize_status(state.get("status"), state.get("count")) in TERMINAL_STATES:
+            record_source_reuse(source_id, state)
+        else:
+            pending_source_ids.append(source_id)
             bundle["layer_states"][source_id] = source_pending_state(area, source_id, request_id)
     store_area_bundle(st.session_state.map_bundle, area["id"], bundle)
+    if not pending_source_ids:
+        st.session_state.active_source_job = None
+        st.session_state.last_apply_message = datetime.now().isoformat(timespec="seconds")
+        st.session_state.last_source_metrics = finish_request_metrics()
+        if st.session_state.last_source_metrics:
+            print(f"[Landfinder][metrics] {json.dumps(st.session_state.last_source_metrics, ensure_ascii=False, default=str)}")
+        st.session_state.pending_filter_apply = False
+        st.session_state.pending_layer_apply = False
+        st.session_state.pending_summary_apply = False
+        return
     st.session_state.active_source_job = {
         "area_id": area["id"],
         "request_id": request_id,
-        "source_ids": source_ids,
+        "source_ids": pending_source_ids,
         "cursor": 0,
         "summary": bool(summary),
         "started_at": runtime_now(),
@@ -2341,6 +2445,7 @@ def advance_active_source_job() -> bool:
         source_id = source_ids[cursor]
         state = (bundle.get("layer_states") or {}).get(source_id) or {}
         if normalize_status(state.get("status"), state.get("count")) in TERMINAL_STATES:
+            record_source_reuse(source_id, state)
             cursor += 1
             job["cursor"] = cursor
             continue
@@ -2352,6 +2457,9 @@ def advance_active_source_job() -> bool:
 
     st.session_state.active_source_job = None
     st.session_state.last_apply_message = datetime.now().isoformat(timespec="seconds")
+    st.session_state.last_source_metrics = finish_request_metrics()
+    if st.session_state.last_source_metrics:
+        print(f"[Landfinder][metrics] {json.dumps(st.session_state.last_source_metrics, ensure_ascii=False, default=str)}")
     st.session_state.pending_filter_apply = False
     st.session_state.pending_layer_apply = False
     st.session_state.pending_summary_apply = False
@@ -2732,6 +2840,30 @@ def render_map() -> None:
     theme = st.session_state.get("page_theme", "Oscuro")
     basemap = basemap_for_theme(theme)
     visible_layers = selected_layer_snapshot()
+    visible_area_records = [area for area in st.session_state.areas if area.get("visible", True)]
+    map_key_payload = {
+        "theme": theme,
+        "active_area": st.session_state.get("active_area_id"),
+        "layers": visible_layers,
+        "areas": [
+            {
+                "id": area.get("id"),
+                "lat": round(float(area["lat"]), 6),
+                "lon": round(float(area["lon"]), 6),
+                "radius_m": int(area.get("radius_m") or 0),
+            }
+            for area in visible_area_records
+        ],
+        "bundles": [
+            {
+                "area_id": area.get("id"),
+                "request_id": (st.session_state.map_bundle.get(area.get("id")) or {}).get("request_id"),
+                "progress": source_progress(st.session_state.map_bundle.get(area.get("id")) or {})[:2],
+            }
+            for area in visible_area_records
+        ],
+    }
+    map_component_key = f"landfinder_map_{cache_digest(json.dumps(map_key_payload, sort_keys=True, ensure_ascii=False, default=str))[:12]}"
     map_obj = folium.Map(
         location=list(st.session_state.map_center),
         zoom_start=int(st.session_state.map_zoom),
@@ -2802,6 +2934,65 @@ def render_map() -> None:
               font-weight: 750;
               box-shadow: 0 10px 24px rgba(0,0,0,.18);
             }}
+            .lf-geo-tooltip table {{
+              border-collapse: collapse;
+            }}
+            .lf-geo-tooltip th {{
+              color: {'#9FB7D3' if dark_controls else '#45627F'};
+              font-size: 11px;
+              letter-spacing: 0;
+              padding: 2px 10px 2px 0;
+              text-align: left;
+            }}
+            .lf-geo-tooltip td {{
+              color: {'#F8FBFF' if dark_controls else '#071426'};
+              font-size: 12px;
+              font-weight: 800;
+              padding: 2px 0;
+            }}
+            .leaflet-popup-content {{
+              margin: 0 !important;
+            }}
+            .lf-map-popup {{
+              min-width: 210px;
+              max-width: 270px;
+              padding: 12px 13px;
+              border-left: 4px solid var(--lf-accent);
+              font-family: Inter, Segoe UI, Arial, sans-serif;
+            }}
+            .lf-map-popup-kicker {{
+              color: {'#9FB7D3' if dark_controls else '#52708D'};
+              font-size: 11px;
+              font-weight: 800;
+              text-transform: uppercase;
+              letter-spacing: 0;
+              margin-bottom: 3px;
+            }}
+            .lf-map-popup-title {{
+              color: {'#F8FBFF' if dark_controls else '#071426'};
+              font-size: 14px;
+              font-weight: 900;
+              line-height: 1.25;
+              margin-bottom: 9px;
+            }}
+            .lf-map-popup-row {{
+              display: flex;
+              justify-content: space-between;
+              gap: 14px;
+              border-top: 1px solid {'#24364D' if dark_controls else '#E2EAF3'};
+              padding-top: 7px;
+              margin-top: 7px;
+            }}
+            .lf-map-popup-row span {{
+              color: {'#9FB7D3' if dark_controls else '#52708D'};
+              font-size: 11px;
+              font-weight: 750;
+            }}
+            .lf-map-popup-row b {{
+              color: {'#F8FBFF' if dark_controls else '#071426'};
+              font-size: 12px;
+              text-align: right;
+            }}
             </style>
             """
         )
@@ -2840,13 +3031,24 @@ def render_map() -> None:
             cluster = MarkerCluster(name=f"Equipamientos · {area_item['name']}")
             for item in bundle.get("visual_assets") or []:
                 distance = haversine_m(area_item["lat"], area_item["lon"], item["lat"], item["lon"])
+                icon_key = item.get("type") or "terrain"
+                icon_color = ASSET_TYPES.get(icon_key, {}).get("color") or "#2563EB"
                 folium.Marker(
                     [item["lat"], item["lon"]],
-                    icon=marker_icon(item.get("type") or "terrain", 34),
+                    icon=marker_icon(icon_key, 30),
                     tooltip=f"{item.get('name')} · {item.get('category')}",
-                    popup=(
-                        f"<b>{item.get('name')}</b><br>{item.get('category')}<br>"
-                        f"Fuente: OpenStreetMap<br>Distancia al área: {distance:,.0f} m".replace(",", ".")
+                    popup=folium.Popup(
+                        map_popup_html(
+                            item.get("name") or item.get("category") or "Equipamiento",
+                            item.get("category") or "Equipamiento",
+                            [
+                                ("Fuente", "OpenStreetMap"),
+                                ("Distancia", f"{distance:,.0f} m".replace(",", ".")),
+                                ("Área", area_item["name"]),
+                            ],
+                            icon_color,
+                        ),
+                        max_width=320,
                     ),
                 ).add_to(cluster)
             cluster.add_to(map_obj)
@@ -2866,10 +3068,24 @@ def render_map() -> None:
         if map_layers.get("osm_construction") and bundle.get("construction"):
             construction = folium.FeatureGroup(name=f"Construcciones OSM · {area_item['name']}", show=True)
             for item in bundle.get("construction") or []:
+                distance = haversine_m(area_item["lat"], area_item["lon"], item["lat"], item["lon"])
                 folium.Marker(
                     [item["lat"], item["lon"]],
-                    icon=marker_icon("construction", 34),
+                    icon=marker_icon("construction", 30),
                     tooltip=item.get("name"),
+                    popup=folium.Popup(
+                        map_popup_html(
+                            item.get("name") or "Construcción mapeada",
+                            "Construcciones OSM",
+                            [
+                                ("Fuente", "OpenStreetMap"),
+                                ("Distancia", f"{distance:,.0f} m".replace(",", ".")),
+                                ("Área", area_item["name"]),
+                            ],
+                            "#FF7A1A",
+                        ),
+                        max_width=320,
+                    ),
                 ).add_to(construction)
             construction.add_to(map_obj)
 
@@ -2895,10 +3111,10 @@ def render_map() -> None:
     folium.LayerControl(collapsed=True).add_to(map_obj)
     map_state = st_folium(
         map_obj,
-        width=None,
         height=760,
-        key="landfinder_single_map",
+        key=map_component_key,
         returned_objects=["last_clicked", "last_object_clicked"],
+        use_container_width=True,
     )
 
     object_click = map_state.get("last_object_clicked") if map_state else None
@@ -3033,9 +3249,27 @@ def render_summary_panel(area: dict[str, Any] | None) -> None:
                     """,
                     unsafe_allow_html=True,
                 )
+            metrics = metrics_snapshot() or st.session_state.get("last_source_metrics")
+            if metrics and metrics.get("run_id") == bundle.get("request_id"):
+                providers = ", ".join(
+                    f"{provider}:{count}"
+                    for provider, count in sorted((metrics.get("request_count_per_provider") or {}).items())
+                ) or "sin red"
+                st.caption(
+                    " · ".join(
+                        [
+                            f"requests {metrics.get('request_count', 0)}",
+                            f"cache HIT {metrics.get('cache_hits', 0)}",
+                            f"MISS {metrics.get('cache_misses', 0)}",
+                            f"reuso {metrics.get('deduplicated_requests', 0)}",
+                            f"red {int(metrics.get('total_network_time_ms') or 0) / 1000:.1f} s",
+                            providers,
+                        ]
+                    )
+                )
             retryable = []
             retry_options = []
-            for layer_id, result in (bundle.get("layer_states") or {}).items():
+            for layer_id, result in ordered_layer_state_items(bundle):
                 label = display_label_for_source(layer_id)
                 status = normalize_status(result.get("status"), result.get("count"))
                 if status in FAILURE_STATES:
@@ -3057,10 +3291,14 @@ def render_summary_panel(area: dict[str, Any] | None) -> None:
                 cache_text = f"<span class='lf-source-pipeline'>{' · '.join(cache_bits)}</span>" if cache_bits else ""
                 expanded = status == LOADING or status in FAILURE_STATES
                 with st.expander(f"{label} · {status_text(result)}", expanded=expanded):
+                    capability = st.session_state.source_capabilities.get(layer_id) or {}
                     meta_bits = [
+                        f"Configurada: {'sí' if capability.get('configured', True) else 'no'}",
                         f"Estado: {status_text(result)}",
                         f"Tiempo: {source_duration_text(result)}",
                     ]
+                    if capability.get("provider"):
+                        meta_bits.append(f"Proveedor: {capability.get('provider')}")
                     if result.get("cache"):
                         meta_bits.append(f"Cache: {result.get('cache')}")
                     if result.get("area_id"):

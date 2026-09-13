@@ -10,6 +10,7 @@ from landfinder.icons import ICON_REGISTRY, marker_svg
 from landfinder.metro_adapter import METRO_FILES, _feature_collection, metro_dataset_status
 from landfinder.registry import load_sources
 from landfinder.runtime_sources import provider_key_for, source_uses_overpass
+from landfinder.source_capabilities import source_capability
 from landfinder.source_states import (
     ERROR,
     MISSING_DATA,
@@ -47,8 +48,16 @@ class SourceRoutingTests(unittest.TestCase):
 
     def test_only_osm_runtime_sources_share_overpass_breaker(self):
         self.assertEqual(provider_key_for("built_hospital", self.sources), "provider:overpass")
+        self.assertEqual(provider_key_for("osm_poi_batch", self.sources), "provider:overpass")
         self.assertEqual(provider_key_for("osm_construction", self.sources), "provider:overpass")
         self.assertNotEqual(provider_key_for("metro_current", self.sources), "provider:overpass")
+
+    def test_configured_capability_is_global_not_area_result(self):
+        capability = source_capability("sea_proyectos", self.sources)
+        area_b_result = {"status": ERROR, "count": None, "area_id": "B"}
+
+        self.assertTrue(capability["configured"])
+        self.assertNotEqual(normalize_status(area_b_result["status"], area_b_result["count"]), "NOT_CONFIGURED")
 
 
 class SemanticStateTests(unittest.TestCase):
